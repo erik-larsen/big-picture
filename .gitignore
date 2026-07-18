@@ -1,0 +1,22 @@
+# generated data (recreate with gen_test_image.py / layout_mosaic.py /
+# build_pyramid.py / export_dzi.py)
+*.npy
+*_pyramid/
+*_dzi/
+*_preview.png
+*_layout.json
+shot_*.png
+
+# python
+__pycache__/
+.venv/
+
+# C build artifacts
+c/*.o
+c/vt_viewer
+c/vt_sphere_viewer
+c/*.dSYM/
+
+# macOS
+.DS_Store
+.claude/
