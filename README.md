@@ -1,5 +1,9 @@
 # big-picture — virtual texturing viewers for giant images
 
+![Flat viewer](media/flat-viewer.png)
+![Sphere viewer](media/sphere-viewer.png)
+
+
 A pipeline for viewing giant images in OpenGL through a custom
 virtual-texturing (MegaTexture / LibVT-style) renderer: synthesize a
 16384×16384 test image *or* mosaic a folder tree of photos into a 16:9
