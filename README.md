@@ -1,7 +1,13 @@
 # big-picture — virtual texturing viewers for giant images
 
+![Photo globe](media/photo-globe.jpg)
+*A folder tree of images mosaicked into one giant picture and wrapped onto a
+globe — 300 images, 50 megapixels, of which just 87 of the atlas's 225 pages
+were resident when this frame was drawn.*
+
 ![Flat viewer](media/flat-viewer.png)
-![Sphere viewer](media/sphere-viewer.png)
+*The 16384² synthetic test image, orbited at 1155 fps. The title bar tracks
+resident pages, pending loads, and total tiles streamed.*
 
 
 A pipeline for viewing giant images in OpenGL through a custom
@@ -65,6 +71,10 @@ python vt_viewer.py                 # interactive orbit
 python vt_viewer.py --frames 240 --screenshot out.png   # self-test
 ```
 
+![1:1 detail](media/detail-1to1.jpg)
+*Zoomed to native resolution: crisp glyph edges and zone-plate rings, with no
+visible seams where tiles meet — the 2px baked borders doing their job.*
+
 Drag = orbit, right-drag/shift-drag = pan, scroll = zoom, click = zoom
 +50% toward the point under the cursor, **F** = freeze/unfreeze
 streaming — freezing pins the current working set: every resident page
@@ -76,11 +86,21 @@ distance, root-level blur beyond; unfreeze to watch refinement stream
 back in. **L** = LOD debug overlay, **R** = reset, **ESC** = quit. Same
 keys in the sphere viewer and the C ports.
 
+![Frozen LOD state](media/frozen-lod.jpg)
+*Pressing **F** close-in, then pulling back: only the 49 of 225 pages that the
+frozen view needed survive, so its footprint stays sharp while everything else
+falls back to the coarsest resident ancestor. The yellow wireframe is the
+frustum that made the choice.*
+
 ## 3b. `vt_sphere_viewer.py` — the mosaic on a sphere band
 
 ```sh
 python vt_sphere_viewer.py --pyramid LandWaterSkyScapes_mosaic_pyramid
 ```
+
+![Sphere viewer](media/sphere-viewer.png)
+*The test image on the sphere band — same virtual-texturing core, different
+geometry.*
 
 Wraps the mosaic equirectangularly onto a sphere band: latitude ±60°,
 longitude span derived from the image aspect for a distortion-free
