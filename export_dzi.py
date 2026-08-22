@@ -50,6 +50,8 @@ window.viewer = OpenSeadragon({
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("pyramid_pos", nargs="?", metavar="PYRAMID",
+                    help="pyramid directory (same as --pyramid)")
     ap.add_argument("--pyramid", default="test_image_16k_pyramid")
     ap.add_argument("--out", default=None,
                     help="output dir (default: <pyramid>_dzi)")

@@ -23,8 +23,9 @@ Works with any rectangular pyramid from build_pyramid.py (square 16k test
 image, 16:9 mosaic, ...); partial edge tiles are supported.
 
 Controls: drag = orbit | right-drag/shift-drag = pan | scroll = zoom
-          click = zoom +50% toward the point under the cursor
-          F = freeze/unfreeze streaming (explore the frozen LOD state)
+          hover = outline the mosaic image under the pointer
+          click = center the view on that image (or on the point)
+          H = cycle highlight style | F = freeze/unfreeze streaming
           L = LOD debug overlay | R = reset camera | ESC = quit
 """
 import argparse
@@ -32,6 +33,7 @@ import ctypes
 import json
 import math
 import queue
+import sys
 import threading
 import time
 from pathlib import Path
@@ -84,6 +86,49 @@ vec4 vtSampleLevel(vec2 uv, int level) {
 """
 
 FRAG_MAIN = VT_COMMON + """
+uniform vec4 uHoverRect;   // (u0,v0,u1,v1) in image UV; off when z <= x
+uniform int uHiStyle;      // 1 flat  2 halo+core  3 adaptive  4 scrim  5 ants
+uniform float uTime;
+uniform float uHiScale;    // framebuffer px per logical point (HiDPI)
+
+// Screen-space outline of the hovered image. The rect is a signed distance
+// field in UV; dividing by the SDF's screen-space gradient converts it to
+// pixels, so the outline keeps a constant pixel width at any zoom, on flat
+// or curved geometry alike.
+vec3 vtHighlight(vec3 col, vec2 uv) {
+    if (uHiStyle == 0 || uHoverRect.z <= uHoverRect.x) return col;
+    vec2 ctr = (uHoverRect.xy + uHoverRect.zw) * 0.5;
+    vec2 hlf = (uHoverRect.zw - uHoverRect.xy) * 0.5;
+    vec2 d = abs(uv - ctr) - hlf;
+    float sd = max(d.x, d.y);                        // < 0 inside the image
+    float spx = length(vec2(dFdx(sd), dFdy(sd)));    // UV units per pixel
+    if (spx <= 0.0) return col;
+    float a = abs(sd / spx);                         // |distance| in pixels
+
+    if (uHiStyle == 4 && sd > 0.0) col *= 0.42;      // scrim: dim the rest
+
+    float k = max(uHiScale, 1.0);                    // widths in points
+    float core = 1.0 - smoothstep(0.6 * k, 1.6 * k, a);   // ~3pt core line
+    float halo = 1.0 - smoothstep(1.6 * k, 3.4 * k, a);   // flanking halo
+
+    if (uHiStyle == 1)                               // plain yellow 2px
+        return mix(col, vec3(1.0, 0.85, 0.0), core);
+
+    if (uHiStyle == 5) {                             // marching ants
+        float run = (abs(d.x) > abs(d.y)) ? gl_FragCoord.y : gl_FragCoord.x;
+        vec3 ant = fract((run - uTime * 40.0 * k) / (14.0 * k)) < 0.5
+                 ? vec3(1.0) : vec3(0.05);
+        col = mix(col, vec3(0.0), halo * 0.5);
+        return mix(col, ant, core);
+    }
+
+    vec3 hi = vec3(1.0, 0.85, 0.0);                  // 2: yellow core
+    if (uHiStyle == 3 || uHiStyle == 4)              // 3/4: pick for contrast
+        hi = dot(col, vec3(0.299, 0.587, 0.114)) > 0.5 ? vec3(0.0) : vec3(1.0);
+    col = mix(col, vec3(0.0), halo * 0.55);          // dark halo under it
+    return mix(col, hi, core);
+}
+
 uniform int uDebug;
 void main() {
     vec2 uv = clamp(vUV, 0.0, 0.9999999);
@@ -95,7 +140,7 @@ void main() {
         vec3 lc = 0.5 + 0.5 * cos(6.2832 * (lod / 7.0 + vec3(0.0, 0.33, 0.67)));
         c.rgb = mix(c.rgb, lc, 0.45);
     }
-    frag = vec4(c.rgb, 1.0);
+    frag = vec4(vtHighlight(c.rgb, uv), 1.0);
 }
 """
 
@@ -125,6 +170,64 @@ uniform vec4 uColor;
 out vec4 frag;
 void main() { frag = uColor; }
 """
+
+
+HI_STYLES = ["off", "flat yellow 2px", "yellow core + dark halo",
+             "contrast-adaptive core", "adaptive + scrim dim",
+             "marching ants"]
+
+
+def check_pyramid(pyramid_dir):
+    """Fail with build instructions instead of a bare traceback when the
+    pyramid hasn't been generated yet (the usual first-run mistake)."""
+    d = Path(pyramid_dir)
+    if (d / "meta.json").exists():
+        return
+    why = (f"'{d}' has no meta.json" if d.is_dir()
+           else f"no such directory: '{d}'")
+    msg = [f"error: {why}", "", "Build a pyramid first:", "",
+           "    ./gen_test_image.py     # synthetic 16384\u00b2 test image",
+           "    ./build_pyramid.py      # -> test_image_16k_pyramid/", "",
+           "...or from your own photos:", "",
+           "    ./layout_mosaic.py ~/Pictures/some_tree",
+           "    ./build_pyramid.py some_tree_mosaic.npy",
+           f"    ./{Path(sys.argv[0]).name} some_tree_mosaic_pyramid"]
+    here = sorted(p.name for p in Path(".").glob("*_pyramid")
+                  if (p / "meta.json").exists())
+    if here:
+        msg += ["", "Pyramids found in this directory:"]
+        msg += [f"    {n}" for n in here]
+    raise SystemExit("\n".join(msg))
+
+
+def load_manifest(pyramid, explicit=None):
+    """layout.json rects for hover/click, derived from the pyramid name
+    (<x>_pyramid -> <x>_layout.json) unless given explicitly."""
+    path = explicit
+    if path is None:
+        name = Path(pyramid).name
+        if name.endswith("_pyramid"):
+            path = Path(pyramid).parent / \
+                f"{name[:-len('_pyramid')]}_layout.json"
+    if path and Path(path).exists():
+        rects = json.loads(Path(path).read_text())
+        print(f"manifest: {path} ({len(rects)} images)")
+        return rects
+    return None
+
+
+def rect_at_uv(manifest, u, v, virt_w, virt_h):
+    """(u0, v0, u1, v1, name) of the mosaic image under (u, v), or None."""
+    if not manifest:
+        return None
+    px, py = u * virt_w, v * virt_h
+    for r in manifest:
+        if (r["x"] <= px < r["x"] + r["w"]
+                and r["y"] <= py < r["y"] + r["h"]):
+            return (r["x"] / virt_w, r["y"] / virt_h,
+                    (r["x"] + r["w"]) / virt_w, (r["y"] + r["h"]) / virt_h,
+                    Path(r["path"]).name)
+    return None
 
 
 def compile_program(vs_src, fs_src):
@@ -232,6 +335,7 @@ class VirtualTexture:
 
     def __init__(self, pyramid_dir):
         self.dir = Path(pyramid_dir)
+        check_pyramid(self.dir)
         meta = json.loads((self.dir / "meta.json").read_text())
         self.virt_w = meta.get("image_width", meta.get("image_size"))
         self.virt_h = meta.get("image_height", meta.get("image_size"))
@@ -533,6 +637,10 @@ class Viewer:
         self.target = np.array([0.0, 0.0, 0.0], np.float32)
         self.debug = 1 if args.debug_lod else 0
         self.freeze = 0
+        self.manifest = load_manifest(args.pyramid, args.manifest)
+        self.hover = None                  # (u0, v0, u1, v1, name)
+        self.hi_style = args.hi_style
+        self._t0 = time.time()
         self._drag = None
         self._press = None
         self._zoom_anim = None
@@ -556,12 +664,45 @@ class Viewer:
                     and abs(pos[0] - self._press[0]) < 4
                     and abs(pos[1] - self._press[1]) < 4
                     and not mods & glfw.MOD_SHIFT):
-                self.click_zoom(*pos)
+                self.update_hover(*pos)
+                if self.hover:
+                    self.center_on(self.hover)
+                else:
+                    self.center_on_point(*pos)
             self._drag = None
             self._press = None
 
+    def update_hover(self, cx, cy):
+        hit = self.cursor_hit(cx, cy)
+        if hit is None:
+            self.hover = None
+            return
+        u = (hit[0] + self.half[0]) / (2 * self.half[0])
+        v = (hit[2] + self.half[1]) / (2 * self.half[1])
+        self.hover = rect_at_uv(self.manifest, u, v,
+                                self.vt.virt_w, self.vt.virt_h)
+
+    def upload_highlight(self, prog):
+        r = self.hover
+        glUniform4f(glGetUniformLocation(prog, "uHoverRect"),
+                    *(r[:4] if r else (0.0, 0.0, -1.0, -1.0)))
+        glUniform1i(glGetUniformLocation(prog, "uHiStyle"), self.hi_style)
+        glUniform1f(glGetUniformLocation(prog, "uTime"),
+                    time.time() - self._t0)
+        fw, _ = glfw.get_framebuffer_size(self.win)
+        ww, _ = glfw.get_window_size(self.win)
+        glUniform1f(glGetUniformLocation(prog, "uHiScale"),
+                    fw / ww if ww else 1.0)
+
+    def center_on(self, rect, duration=0.45):
+        """Glide so the hovered image is centered; zoom is unchanged."""
+        cu, cv = (rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2
+        self.glide_to((( cu - 0.5) * 2 * self.half[0], 0.0,
+                       ( cv - 0.5) * 2 * self.half[1]), duration)
+
     def on_cursor(self, win, x, y):
         if not self._drag:
+            self.update_hover(x, y)
             return
         mode, (px, py) = self._drag
         dx, dy = x - px, y - py
@@ -600,29 +741,22 @@ class Viewer:
             return None
         return hit.astype(np.float32)
 
-    def click_zoom(self, cx, cy, factor=1.5, duration=0.4):
-        """Zoom by `factor` keeping the clicked point fixed on screen:
-        the eye moves straight toward the hit point, so scaling both the
-        distance and the target's offset from the hit preserves the ray.
-        Animated with ease-in/ease-out; lerping target and dist by the
-        same eased fraction keeps the clicked point pinned throughout."""
+    def center_on_point(self, cx, cy, duration=0.4):
+        """Glide the view to center the clicked point; zoom is unchanged."""
         hit = self.cursor_hit(cx, cy)
-        if hit is None:
-            return
-        s = 1.0 / factor
-        # rapid clicks compound: zoom from the in-flight glide's
-        # destination, not the barely-moved current pose
-        a = self._zoom_anim
-        base_target = a["target1"] if a else self.target
-        base_dist = a["dist1"] if a else self.dist
-        end_target = hit + (base_target - hit) * s
-        end_target[1] = 0
-        end_target[0] = min(max(end_target[0], -self.half[0]), self.half[0])
-        end_target[2] = min(max(end_target[2], -self.half[1]), self.half[1])
+        if hit is not None:
+            self.glide_to(hit, duration)
+
+    def glide_to(self, end_target, duration):
+        """Eased glide of the orbit target, holding the camera distance."""
+        end = np.array(end_target, np.float32).copy()
+        end[1] = 0.0
+        end[0] = min(max(end[0], -self.half[0]), self.half[0])
+        end[2] = min(max(end[2], -self.half[1]), self.half[1])
         self._zoom_anim = {
             "t": time.time(), "dur": duration,
-            "target0": self.target.copy(), "target1": end_target,
-            "dist0": self.dist, "dist1": max(base_dist * s, 0.05),
+            "target0": self.target.copy(), "target1": end,
+            "dist0": self.dist, "dist1": self.dist,
         }
 
     def update_zoom_anim(self):
@@ -649,6 +783,9 @@ class Viewer:
             self.debug ^= 1
         elif key == glfw.KEY_F:
             self.toggle_freeze()
+        elif key == glfw.KEY_H:
+            self.hi_style = (self.hi_style + 1) % 6
+            print(f"highlight style {self.hi_style}: {HI_STYLES[self.hi_style]}")
         elif key == glfw.KEY_R:
             self._zoom_anim = None
             self.yaw, self.pitch, self.dist = 0.6, 0.9, 14.0
@@ -735,10 +872,10 @@ class Viewer:
                     extra = frame - self.args.frames
                     if self.args.click_test and extra in (20, 45, 70):
                         w, h = glfw.get_window_size(self.win)
-                        self.click_zoom(w / 2, h / 2)
+                        self.center_on_point(w / 2, h / 2)
                         if self._zoom_anim:
-                            print(f"click-zoom @center -> dist "
-                                  f"{self._zoom_anim['dist1']:.2f}")
+                            t = self._zoom_anim["target1"]
+                            print(f"click -> center ({t[0]:.2f}, {t[2]:.2f})")
                     min_extra = 90 if self.args.click_test else 0
                     settled = (extra > min_extra
                                and self._zoom_anim is None
@@ -760,6 +897,7 @@ class Viewer:
             glUseProgram(self.prog_main)
             glUniform1i(glGetUniformLocation(self.prog_main, "uDebug"),
                         self.debug)
+            self.upload_highlight(self.prog_main)
             self.draw(self.prog_main, mvp)
             if self.freeze:
                 self.frustum.draw(mvp)
@@ -793,6 +931,8 @@ class Viewer:
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("pyramid_pos", nargs="?", metavar="PYRAMID",
+                    help="pyramid directory (same as --pyramid)")
     ap.add_argument("--pyramid", default="test_image_16k_pyramid")
     ap.add_argument("--frames", type=int, default=None,
                     help="run a scripted N-frame orbit and exit (self-test)")
@@ -802,6 +942,11 @@ def main():
                     help="final camera distance for the scripted orbit")
     ap.add_argument("--end-uv", default="0.625,0.5625",
                     help="final scripted-orbit target as u,v in [0,1]")
+    ap.add_argument("--manifest", default=None,
+                    help="layout.json for hover/click "
+                         "(default: derived from the pyramid name)")
+    ap.add_argument("--hi-style", type=int, default=2,
+                    help="highlight style 0-5 (see H key)")
     ap.add_argument("--debug-lod", action="store_true",
                     help="start with the LOD debug overlay enabled")
     ap.add_argument("--click-test", action="store_true",
@@ -810,7 +955,11 @@ def main():
     ap.add_argument("--freeze-test", action="store_true",
                     help="in scripted mode, freeze at the end pose then "
                          "pull back to show the pinned frustum")
-    Viewer(ap.parse_args()).run()
+    args = ap.parse_args()
+    if args.pyramid_pos:                   # allow a bare positional path
+        args.pyramid = args.pyramid_pos
+    check_pyramid(args.pyramid)            # before opening a window
+    Viewer(args).run()
 
 
 if __name__ == "__main__":

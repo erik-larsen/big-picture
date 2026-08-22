@@ -14,14 +14,16 @@ Two modes:
 
 Clicking glides the camera (ease-in/ease-out) to center the clicked
 *image* — found via the mosaic's layout.json manifest, falling back to
-the clicked point — by moving the camera's azimuth/elevation, while
-zooming +50%. The clicked file's name is shown in the window title.
+the clicked point — by moving the camera's azimuth/elevation. The
+clicked file's name is shown in the window title.
 
 Streaming, page table, atlas, and shaders are shared with vt_viewer.py —
 virtual texturing doesn't care what geometry the UVs live on.
 
 Controls: drag = orbit / look around | scroll = zoom
-          click = center clicked image and zoom +50%
+          hover = outline the mosaic image under the pointer
+          click = center the view on the clicked image
+          H = cycle highlight style
           F = freeze/unfreeze streaming (explore the frozen LOD state)
           L = LOD debug overlay | R = reset view | ESC = quit
 """
@@ -38,7 +40,8 @@ from OpenGL.GL import *  # noqa: F403
 from PIL import Image
 
 from vt_viewer import (VERT, FRAG_MAIN, FRAG_FEEDBACK, FrustumLines,
-                       VirtualTexture, compile_program, perspective, look_at)
+                       VirtualTexture, compile_program, perspective, look_at,
+                       rect_at_uv, HI_STYLES, check_pyramid)
 
 LAT_MAX = math.radians(60.0)
 RADIUS = 10.0
@@ -146,6 +149,9 @@ class SphereViewer:
         self.height = 12.0
         self.debug = 0
         self.freeze = 0
+        self.hover = None                  # (u0, v0, u1, v1, name)
+        self.hi_style = args.hi_style
+        self._t0 = time.time()
         self._drag = None
         self._press = None
         self._anim = None
@@ -251,8 +257,27 @@ class SphereViewer:
             return 0.0025 * self.fov / 70.0     # slower when zoomed in
         return 0.005 * min(max(self.height / RADIUS, 0.03), 1.5)
 
+    def update_hover(self, cx, cy):
+        uv = self.cursor_uv(cx, cy)
+        self.hover = (rect_at_uv(self.manifest, uv[0], uv[1],
+                                 self.vt.virt_w, self.vt.virt_h)
+                      if uv else None)
+
+    def upload_highlight(self, prog):
+        r = self.hover
+        glUniform4f(glGetUniformLocation(prog, "uHoverRect"),
+                    *(r[:4] if r else (0.0, 0.0, -1.0, -1.0)))
+        glUniform1i(glGetUniformLocation(prog, "uHiStyle"), self.hi_style)
+        glUniform1f(glGetUniformLocation(prog, "uTime"),
+                    time.time() - self._t0)
+        fw, _ = glfw.get_framebuffer_size(self.win)
+        ww, _ = glfw.get_window_size(self.win)
+        glUniform1f(glGetUniformLocation(prog, "uHiScale"),
+                    fw / ww if ww else 1.0)
+
     def on_cursor(self, win, x, y):
         if not self._drag:
+            self.update_hover(x, y)
             return
         now = time.time()
         self._last_input = now
@@ -291,6 +316,9 @@ class SphereViewer:
             self.debug ^= 1
         elif key == glfw.KEY_F:
             self.toggle_freeze()
+        elif key == glfw.KEY_H:
+            self.hi_style = (self.hi_style + 1) % 6
+            print(f"highlight style {self.hi_style}: {HI_STYLES[self.hi_style]}")
         elif key == glfw.KEY_R:
             self._anim = None
             self.az, self.el = 0.0, 0.0
@@ -310,7 +338,7 @@ class SphereViewer:
             self.vt.evict_unused()         # keep only this view's pages
 
     # ---- click: center the image under the cursor, zoom +50% ----------
-    def click_center_zoom(self, cx, cy, factor=1.5, duration=0.5):
+    def click_center_zoom(self, cx, cy, duration=0.5):
         uv = self.cursor_uv(cx, cy)
         if uv is None:
             return
@@ -324,17 +352,14 @@ class SphereViewer:
                     cv = (r["y"] + r["h"] / 2) / self.vt.virt_h
                     self._last_click = Path(r["path"]).name
                     break
-        a = self._anim
-        base_zoom = a["zoom1"] if a else (self.fov if self.inside
-                                          else self.height)
+        zoom = self.fov if self.inside else self.height
         az1 = (cu - 0.5) * 2 * self.lon_half
         el1 = (0.5 - cv) * 2 * LAT_MAX
         self._anim = {
             "t": time.time(), "dur": duration,
             "az0": self.az, "az1": self.az + wrap_pi(az1 - self.az),
             "el0": self.el, "el1": el1,
-            "zoom0": self.fov if self.inside else self.height,
-            "zoom1": max(base_zoom / factor, 3.0 if self.inside else 0.02),
+            "zoom0": zoom, "zoom1": zoom,      # centering only, no zoom
         }
 
     def update_free_motion(self, dt):
@@ -463,6 +488,7 @@ class SphereViewer:
             glUseProgram(self.prog_main)
             glUniform1i(glGetUniformLocation(self.prog_main, "uDebug"),
                         self.debug)
+            self.upload_highlight(self.prog_main)
             self.draw(self.prog_main, mvp)
             if self.freeze:
                 self.frustum.draw(mvp)
@@ -497,12 +523,16 @@ class SphereViewer:
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("pyramid_pos", nargs="?", metavar="PYRAMID",
+                    help="pyramid directory (same as --pyramid)")
     ap.add_argument("--pyramid", default="test_image_16k_pyramid")
     ap.add_argument("--inside", action="store_true",
                     help="view from the sphere's center (panorama mode)")
     ap.add_argument("--manifest", default=None,
                     help="layout.json for click-to-center "
                          "(default: derived from the pyramid name)")
+    ap.add_argument("--hi-style", type=int, default=2,
+                    help="highlight style 0-5 (see H key)")
     ap.add_argument("--frames", type=int, default=None,
                     help="run a scripted N-frame sweep and exit")
     ap.add_argument("--screenshot", default=None)
@@ -517,7 +547,11 @@ def main():
                          "starts (<= 0 disables)")
     ap.add_argument("--idle-speed", type=float, default=3.0,
                     help="auto-rotate speed in degrees/second")
-    SphereViewer(ap.parse_args()).run()
+    args = ap.parse_args()
+    if args.pyramid_pos:                   # allow a bare positional path
+        args.pyramid = args.pyramid_pos
+    check_pyramid(args.pyramid)            # before opening a window
+    SphereViewer(args).run()
 
 
 if __name__ == "__main__":

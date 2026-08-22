@@ -70,6 +70,12 @@ typedef struct {
     GLuint prog_main, prog_fb;
 } VtSystem;
 
+extern const char *vt_argv0;   /* program name, used in error hints */
+
+/* True if <dir>/meta.json exists; otherwise prints build instructions.
+   Call before opening a window so a missing pyramid doesn't flash one. */
+bool vt_check_pyramid(const char *pyramid_dir);
+
 /* lifecycle */
 bool vt_init(VtSystem *vt, const char *pyramid_dir);
 void vt_destroy(VtSystem *vt);
@@ -97,6 +103,20 @@ void vt_lines_init(VtLines *fl);
 void vt_lines_capture(VtLines *fl, const float *mvp, const float eye[3],
                       float near_dist, float far_dist);
 void vt_lines_draw(VtLines *fl, const float *mvp_now);
+
+/* ---- mosaic manifest (layout.json): hover + click-to-center ---- */
+typedef struct { char name[256]; int x, y, w, h; } VtRect;
+typedef struct { VtRect *rects; int n; } VtManifest;
+
+/* Loads <pyramid>_layout.json (or explicit_path). Returns false if absent. */
+bool vt_manifest_load(VtManifest *m, const char *pyramid_dir,
+                      const char *explicit_path);
+/* Index of the image covering (u,v), or -1. Fills out_uv = u0,v0,u1,v1. */
+int vt_manifest_rect_at(const VtManifest *m, float u, float v,
+                        int virt_w, int virt_h, float out_uv[4]);
+/* Upload the highlight uniforms; pass rect_uv = NULL for "no hover". */
+void vt_highlight_uniforms(GLuint prog, const float rect_uv[4], int style,
+                           float t, float dpi_scale);
 
 /* ---- small matrix / vector helpers (row-major float[16]) ---- */
 void mat4_perspective(float *m, float fovy_deg, float aspect,

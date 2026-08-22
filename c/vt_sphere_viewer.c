@@ -5,8 +5,8 @@
     Latitude spans +-60 deg; longitude span comes from the image aspect
     (distortion-free equator, capped at 360). Default view orbits the
     OUTSIDE of the sphere (globe); --inside views from the center.
-    Click centers the clicked image (via <pyramid>_layout.json) with an
-    eased glide while zooming +50%. Trackball fling inertia and slow
+    Hovering outlines the image under the pointer; clicking centers it
+    (via <pyramid>_layout.json) with an eased glide. Trackball fling inertia and slow
     idle auto-rotate included.
 
     Usage: vt_sphere_viewer [--pyramid DIR] [--inside] [--manifest F]
@@ -28,20 +28,18 @@
 #define N_LAT 64
 
 typedef struct {
-    char name[256];
-    int x, y, w, h;
-} Rect;
-
-typedef struct {
     VtWindow w;
     VtSystem vt;
     GLuint vbo, ebo;
     int n_idx;
     float lon_half;
 
-    Rect *rects;
-    int n_rects;
+    VtManifest manifest;
     char last_click[256];
+    float hover_uv[4];
+    bool has_hover;
+    int hi_style;
+    double t0;
 
     bool inside;
     float az, el, fov, height;
@@ -67,7 +65,7 @@ typedef struct {
     const char *pyramid, *manifest_path, *screenshot;
     int frames;
     float end_fov, end_height, idle_delay, idle_speed;
-    bool click_test;
+    bool click_test, hover_test;
 } App;
 
 static float clampf(float v, float lo, float hi)
@@ -84,66 +82,20 @@ static float wrap_pi(float a)
 
 static void load_manifest(App *a)
 {
-    char path[1200];
-    if (a->manifest_path) {
-        snprintf(path, sizeof path, "%s", a->manifest_path);
-    } else {
-        const char *suffix = "_pyramid";
-        size_t n = strlen(a->pyramid), sn = strlen(suffix);
-        if (n <= sn || strcmp(a->pyramid + n - sn, suffix) != 0)
-            return;
-        snprintf(path, sizeof path, "%.*s_layout.json",
-                 (int)(n - sn), a->pyramid);
-    }
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return;
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char *buf = malloc(size + 1);
-    fread(buf, 1, size, f);
-    buf[size] = 0;
-    fclose(f);
+    vt_manifest_load(&a->manifest, a->pyramid, a->manifest_path);
+}
 
-    int cap = 256;
-    a->rects = malloc(cap * sizeof(Rect));
-    const char *p = buf;
-    while ((p = strstr(p, "\"path\"")) != NULL) {
-        const char *q = strchr(p + 6, ':');
-        if (!q) break;
-        q = strchr(q, '"');
-        if (!q) break;
-        q++;
-        const char *e = strchr(q, '"');
-        if (!e) break;
-        if (a->n_rects == cap) {
-            cap *= 2;
-            a->rects = realloc(a->rects, cap * sizeof(Rect));
-        }
-        Rect *r = &a->rects[a->n_rects];
-        const char *base = e;                 /* keep only the basename */
-        for (const char *s = q; s < e; s++)
-            if (*s == '/') base = s;
-        int len = (int)(e - (base == e ? q : base + 1));
-        if (len >= (int)sizeof r->name) len = sizeof r->name - 1;
-        memcpy(r->name, base == e ? q : base + 1, len);
-        r->name[len] = 0;
-        const char *cur = e;
-        const char *kx = strstr(cur, "\"x\"");
-        const char *ky = strstr(cur, "\"y\"");
-        const char *kw = strstr(cur, "\"w\"");
-        const char *kh = strstr(cur, "\"h\"");
-        if (!kx || !ky || !kw || !kh) break;
-        r->x = atoi(strchr(kx, ':') + 1);
-        r->y = atoi(strchr(ky, ':') + 1);
-        r->w = atoi(strchr(kw, ':') + 1);
-        r->h = atoi(strchr(kh, ':') + 1);
-        a->n_rects++;
-        p = kh;
-    }
-    free(buf);
-    printf("manifest: %s (%d images)\n", path, a->n_rects);
+static bool cursor_uv(App *a, float cx, float cy, float *cu, float *cv);
+
+/* cursor -> band -> mosaic uv -> hovered image rect */
+static void update_hover(App *a, float cx, float cy)
+{
+    float cu, cv;
+    a->has_hover = false;
+    if (!a->manifest.rects || !cursor_uv(a, cx, cy, &cu, &cv))
+        return;
+    a->has_hover = vt_manifest_rect_at(&a->manifest, cu, cv, a->vt.virt_w,
+                                       a->vt.virt_h, a->hover_uv) >= 0;
 }
 
 /* --------------------------------------------------------------- camera */
@@ -240,30 +192,24 @@ static void click_center_zoom(App *a, float cx, float cy)
     float cu, cv;
     if (!cursor_uv(a, cx, cy, &cu, &cv))
         return;
-    if (a->rects) {
-        float px = cu * a->vt.virt_w, py = cv * a->vt.virt_h;
-        for (int i = 0; i < a->n_rects; i++) {
-            Rect *r = &a->rects[i];
-            if (px >= r->x && px < r->x + r->w
-                    && py >= r->y && py < r->y + r->h) {
-                cu = (r->x + r->w / 2.0f) / a->vt.virt_w;
-                cv = (r->y + r->h / 2.0f) / a->vt.virt_h;
-                snprintf(a->last_click, sizeof a->last_click,
-                         "%s", r->name);
-                break;
-            }
-        }
+    float rect[4];
+    int hit = vt_manifest_rect_at(&a->manifest, cu, cv, a->vt.virt_w,
+                                  a->vt.virt_h, rect);
+    if (hit >= 0) {                      /* center the image, not the point */
+        cu = (rect[0] + rect[2]) * 0.5f;
+        cv = (rect[1] + rect[3]) * 0.5f;
+        snprintf(a->last_click, sizeof a->last_click, "%s",
+                 a->manifest.rects[hit].name);
     }
-    float base = a->anim.active ? a->anim.zoom1
-               : (a->inside ? a->fov : a->height);
+    float zoom = a->inside ? a->fov : a->height;
     float az1 = (cu - 0.5f) * 2 * a->lon_half;
     float el1 = (0.5f - cv) * 2 * LAT_MAX;
     a->anim.az0 = a->az;
     a->anim.az1 = a->az + wrap_pi(az1 - a->az);
     a->anim.el0 = a->el;
     a->anim.el1 = el1;
-    a->anim.zoom0 = a->inside ? a->fov : a->height;
-    a->anim.zoom1 = fmaxf(base / 1.5f, a->inside ? 3.0f : 0.02f);
+    a->anim.zoom0 = zoom;
+    a->anim.zoom1 = zoom;                 /* centering only, no zoom */
     a->anim.t0 = now_seconds();
     a->anim.dur = 0.5;
     a->anim.active = true;
@@ -436,6 +382,10 @@ static void handle_events(App *a, bool *running)
                 a->debug ^= 1;
             else if (ev.key.keysym.sym == SDLK_f)
                 toggle_freeze(a);
+            else if (ev.key.keysym.sym == SDLK_h) {
+                a->hi_style = (a->hi_style + 1) % 6;
+                printf("highlight style %d\n", a->hi_style);
+            }
             else if (ev.key.keysym.sym == SDLK_r) {
                 a->anim.active = false;
                 a->vel_az = a->vel_el = 0;
@@ -469,6 +419,8 @@ static void handle_events(App *a, bool *running)
             a->has_press = false;
             break;
         case SDL_MOUSEMOTION:
+            if (!a->dragging)
+                update_hover(a, ev.motion.x, ev.motion.y);
             if (a->dragging) {
                 double now = now_seconds();
                 a->last_input = now;
@@ -517,6 +469,7 @@ int main(int argc, char **argv)
 {
     App a;
     memset(&a, 0, sizeof a);
+    vt_argv0 = argv[0];
     a.pyramid = "test_image_16k_pyramid";
     a.frames = -1;
     a.end_fov = 28.0f;
@@ -524,6 +477,7 @@ int main(int argc, char **argv)
     a.idle_delay = 5.0f;
     a.idle_speed = 3.0f;
     a.idle_dir = 1.0f;
+    a.hi_style = 2;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--pyramid") && i + 1 < argc)
             a.pyramid = argv[++i];
@@ -545,10 +499,16 @@ int main(int argc, char **argv)
             a.idle_speed = atof(argv[++i]);
         else if (!strcmp(argv[i], "--click-test"))
             a.click_test = true;
+        else if (!strcmp(argv[i], "--hover-test"))
+            a.hover_test = true;
+        else if (!strcmp(argv[i], "--hi-style") && i + 1 < argc)
+            a.hi_style = atoi(argv[++i]);
         else if (argv[i][0] != '-')
             a.pyramid = argv[i];
     }
 
+    if (!vt_check_pyramid(a.pyramid))     /* before opening a window */
+        return 1;
     if (!vtw_create(&a.w, "vt sphere viewer (C/GLES2)"))
         return 1;
     SDL_GL_SetSwapInterval(a.frames >= 0 ? 0 : 1);
@@ -556,6 +516,7 @@ int main(int argc, char **argv)
         return 1;
     load_manifest(&a);
     vt_lines_init(&a.lines);
+    a.t0 = now_seconds();
 
     float aspect = (float)a.vt.virt_w / a.vt.virt_h;
     a.lon_half = fminf((float)M_PI, LAT_MAX * aspect);
@@ -590,6 +551,11 @@ int main(int argc, char **argv)
                     a.height = 12.0f * powf(a.end_height / 12.0f, k);
             } else {
                 int extra = frame - a.frames;
+                if (a.hover_test) {          /* hover the window centre */
+                    int ww, wh;
+                    SDL_GetWindowSize(a.w.win, &ww, &wh);
+                    update_hover(&a, ww / 2.0f, wh / 2.0f);
+                }
                 if (a.click_test
                         && (extra == 20 || extra == 60 || extra == 100)) {
                     int ww, wh;
@@ -625,6 +591,9 @@ int main(int argc, char **argv)
         DrawCtx main_ctx = {&a, a.vt.prog_main};
         vt_bind(&a.vt, a.vt.prog_main);
         glUniform1i(glGetUniformLocation(a.vt.prog_main, "uDebug"), a.debug);
+        vt_highlight_uniforms(a.vt.prog_main, a.has_hover ? a.hover_uv : NULL,
+                              a.hi_style, (float)(now_seconds() - a.t0),
+                              a.w.dpi_scale);
         draw_band(&main_ctx);
         if (a.freeze)
             vt_lines_draw(&a.lines, a.mvp);

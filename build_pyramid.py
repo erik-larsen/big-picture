@@ -74,11 +74,15 @@ def cut_tiles(level_img, level, out_dir, fmt):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("src_pos", nargs="?", metavar="SRC",
+                    help="source .npy (same as --src)")
     ap.add_argument("--src", default="test_image_16k.npy")
     ap.add_argument("--out", default=None,
                     help="output dir (default: <src stem>_pyramid)")
     ap.add_argument("--format", choices=["png", "jpg"], default="png")
     args = ap.parse_args()
+    if args.src_pos:                       # allow a bare positional path
+        args.src = args.src_pos
     if args.out is None:
         args.out = f"{Path(args.src).stem}_pyramid"
 

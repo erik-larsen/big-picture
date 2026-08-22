@@ -15,6 +15,8 @@
 
 /* ---------------------------------------------------------------- misc */
 
+const char *vt_argv0 = "./vt_viewer";   /* set from main() for error hints */
+
 double now_seconds(void)
 {
     return (double)SDL_GetPerformanceCounter()
@@ -76,7 +78,44 @@ static const char *VS_SRC =
     "  return texture2D(uAtlas, auv);\n" \
     "}\n"
 
-static const char *FS_MAIN_SRC = VT_GLSL_COMMON
+
+#define VT_GLSL_HIGHLIGHT \
+    "uniform vec4 uHoverRect;\n"      /* (u0,v0,u1,v1); off when z <= x */ \
+    "uniform int uHiStyle;\n" \
+    "uniform float uTime;\n" \
+    "uniform float uHiScale;\n"       /* framebuffer px per logical point */ \
+    /* Screen-space outline of the hovered image: the rect is an SDF in UV, \
+       divided by its screen-space gradient to get pixels, so the line keeps \
+       a constant width at any zoom, on flat or curved geometry alike. */ \
+    "vec3 vtHighlight(vec3 col, vec2 uv) {\n" \
+    "  if (uHiStyle == 0 || uHoverRect.z <= uHoverRect.x) return col;\n" \
+    "  vec2 ctr = (uHoverRect.xy + uHoverRect.zw) * 0.5;\n" \
+    "  vec2 hlf = (uHoverRect.zw - uHoverRect.xy) * 0.5;\n" \
+    "  vec2 d = abs(uv - ctr) - hlf;\n" \
+    "  float sd = max(d.x, d.y);\n" \
+    "  float spx = length(vec2(dFdx(sd), dFdy(sd)));\n" \
+    "  if (spx <= 0.0) return col;\n" \
+    "  float a = abs(sd / spx);\n" \
+    "  if (uHiStyle == 4 && sd > 0.0) col *= 0.42;\n" \
+    "  float k = max(uHiScale, 1.0);\n" \
+    "  float core = 1.0 - smoothstep(0.6*k, 1.6*k, a);\n" \
+    "  float halo = 1.0 - smoothstep(1.6*k, 3.4*k, a);\n" \
+    "  if (uHiStyle == 1) return mix(col, vec3(1.0,0.85,0.0), core);\n" \
+    "  if (uHiStyle == 5) {\n" \
+    "    float run = (abs(d.x) > abs(d.y)) ? gl_FragCoord.y : gl_FragCoord.x;\n" \
+    "    vec3 ant = fract((run - uTime*40.0*k)/(14.0*k)) < 0.5\n" \
+    "             ? vec3(1.0) : vec3(0.05);\n" \
+    "    col = mix(col, vec3(0.0), halo * 0.5);\n" \
+    "    return mix(col, ant, core);\n" \
+    "  }\n" \
+    "  vec3 hi = vec3(1.0, 0.85, 0.0);\n" \
+    "  if (uHiStyle == 3 || uHiStyle == 4)\n" \
+    "    hi = dot(col, vec3(0.299,0.587,0.114)) > 0.5 ? vec3(0.0) : vec3(1.0);\n" \
+    "  col = mix(col, vec3(0.0), halo * 0.55);\n" \
+    "  return mix(col, hi, core);\n" \
+    "}\n"
+
+static const char *FS_MAIN_SRC = VT_GLSL_COMMON VT_GLSL_HIGHLIGHT
     "uniform int uDebug;\n"
     "void main(){\n"
     "  vec2 uv = clamp(vUV, 0.0, 0.9999999);\n"
@@ -88,7 +127,7 @@ static const char *FS_MAIN_SRC = VT_GLSL_COMMON
     "    vec3 lc = 0.5+0.5*cos(6.2832*(lod/7.0+vec3(0.0,0.33,0.67)));\n"
     "    c.rgb = mix(c.rgb, lc, 0.45);\n"
     "  }\n"
-    "  gl_FragColor = vec4(c.rgb, 1.0);\n"
+    "  gl_FragColor = vec4(vtHighlight(c.rgb, uv), 1.0);\n"
     "}\n";
 
 /* feedback: pack (pageX:12, pageY:12, level:4) with float arithmetic;
@@ -250,6 +289,97 @@ static void json_str(const char *s, const char *key, char *out, int cap)
     if (!e || e - p >= cap) return;
     memcpy(out, p, e - p);
     out[e - p] = 0;
+}
+
+/* ------------------------------------------------------------ manifest */
+
+bool vt_manifest_load(VtManifest *m, const char *pyramid_dir,
+                      const char *explicit_path)
+{
+    memset(m, 0, sizeof *m);
+    char path[1200];
+    if (explicit_path) {
+        snprintf(path, sizeof path, "%s", explicit_path);
+    } else {
+        const char *suffix = "_pyramid";
+        size_t n = strlen(pyramid_dir), sn = strlen(suffix);
+        if (n <= sn || strcmp(pyramid_dir + n - sn, suffix) != 0)
+            return false;
+        snprintf(path, sizeof path, "%.*s_layout.json",
+                 (int)(n - sn), pyramid_dir);
+    }
+    char *buf = read_file(path, NULL);
+    if (!buf)
+        return false;
+
+    int cap = 256;
+    m->rects = malloc(cap * sizeof(VtRect));
+    const char *p = buf;
+    while ((p = strstr(p, "\"path\"")) != NULL) {
+        const char *q = strchr(p + 6, ':');
+        if (!q) break;
+        q = strchr(q, '"');
+        if (!q) break;
+        q++;
+        const char *e = strchr(q, '"');
+        if (!e) break;
+        if (m->n == cap) {
+            cap *= 2;
+            m->rects = realloc(m->rects, cap * sizeof(VtRect));
+        }
+        VtRect *r = &m->rects[m->n];
+        const char *base = q;                 /* keep only the basename */
+        for (const char *c = q; c < e; c++)
+            if (*c == '/') base = c + 1;
+        int len = (int)(e - base);
+        if (len >= (int)sizeof r->name) len = sizeof r->name - 1;
+        memcpy(r->name, base, len);
+        r->name[len] = 0;
+        const char *kx = strstr(e, "\"x\""), *ky = strstr(e, "\"y\"");
+        const char *kw = strstr(e, "\"w\""), *kh = strstr(e, "\"h\"");
+        if (!kx || !ky || !kw || !kh) break;
+        r->x = atoi(strchr(kx, ':') + 1);
+        r->y = atoi(strchr(ky, ':') + 1);
+        r->w = atoi(strchr(kw, ':') + 1);
+        r->h = atoi(strchr(kh, ':') + 1);
+        m->n++;
+        p = kh;
+    }
+    free(buf);
+    printf("manifest: %s (%d images)\n", path, m->n);
+    return m->n > 0;
+}
+
+int vt_manifest_rect_at(const VtManifest *m, float u, float v,
+                        int virt_w, int virt_h, float out_uv[4])
+{
+    if (!m || !m->rects)
+        return -1;
+    float px = u * virt_w, py = v * virt_h;
+    for (int i = 0; i < m->n; i++) {
+        const VtRect *r = &m->rects[i];
+        if (px >= r->x && px < r->x + r->w
+                && py >= r->y && py < r->y + r->h) {
+            out_uv[0] = (float)r->x / virt_w;
+            out_uv[1] = (float)r->y / virt_h;
+            out_uv[2] = (float)(r->x + r->w) / virt_w;
+            out_uv[3] = (float)(r->y + r->h) / virt_h;
+            return i;
+        }
+    }
+    return -1;
+}
+
+void vt_highlight_uniforms(GLuint prog, const float rect_uv[4], int style,
+                           float t, float dpi_scale)
+{
+    static const float none[4] = {0.0f, 0.0f, -1.0f, -1.0f};
+    const float *r = rect_uv ? rect_uv : none;
+    glUniform4f(glGetUniformLocation(prog, "uHoverRect"),
+                r[0], r[1], r[2], r[3]);
+    glUniform1i(glGetUniformLocation(prog, "uHiStyle"), style);
+    glUniform1f(glGetUniformLocation(prog, "uTime"), t);
+    glUniform1f(glGetUniformLocation(prog, "uHiScale"), dpi_scale);
 }
 
 /* -------------------------------------------------------- loader thread */
@@ -493,6 +623,28 @@ void vt_request_from_feedback(VtSystem *vt, const unsigned char *rgba, int n)
 
 /* ----------------------------------------------------------- init / bind */
 
+bool vt_check_pyramid(const char *pyramid_dir)
+{
+    char meta_path[1100];
+    snprintf(meta_path, sizeof meta_path, "%s/meta.json", pyramid_dir);
+    FILE *f = fopen(meta_path, "rb");
+    if (f) {
+        fclose(f);
+        return true;
+    }
+    fprintf(stderr,
+        "error: no tile pyramid at '%s' (no meta.json)\n\n"
+        "Build one first:\n\n"
+        "    ./gen_test_image.py     # synthetic test image\n"
+        "    ./build_pyramid.py      # -> test_image_16k_pyramid/\n\n"
+        "...or from your own photos:\n\n"
+        "    ./layout_mosaic.py ~/Pictures/some_tree\n"
+        "    ./build_pyramid.py some_tree_mosaic.npy\n\n"
+        "then point the viewer at the pyramid directory:\n\n"
+        "    %s <pyramid_dir>\n", pyramid_dir, vt_argv0);
+    return false;
+}
+
 bool vt_init(VtSystem *vt, const char *pyramid_dir)
 {
     memset(vt, 0, sizeof *vt);
@@ -502,7 +654,7 @@ bool vt_init(VtSystem *vt, const char *pyramid_dir)
     snprintf(meta_path, sizeof meta_path, "%s/meta.json", pyramid_dir);
     char *meta = read_file(meta_path, NULL);
     if (!meta) {
-        fprintf(stderr, "cannot read %s\n", meta_path);
+        vt_check_pyramid(pyramid_dir);
         return false;
     }
     int size = json_int(meta, "image_size", 0);

@@ -1,177 +1,160 @@
 # big-picture — virtual texturing viewers for giant images
 
+Explore multi-gigapixel images in real time while the GPU only ever holds a
+single 4096² texture. A MegaTexture / LibVT-style virtual texturing renderer,
+in Python (OpenGL 3.3) and C (SDL2 + OpenGL ES 2.0).
+
 ![Photo globe](media/photo-globe.jpg)
 *A folder tree of images mosaicked into one giant picture and wrapped onto a
-globe — 300 images, 50 megapixels, of which just 87 of the atlas's 225 pages
+globe — 300 images, 50 megapixels, of which only 87 of the atlas's 225 pages
 were resident when this frame was drawn.*
 
 ![Flat viewer](media/flat-viewer.png)
 *The 16384² synthetic test image, orbited at 1155 fps. The title bar tracks
-resident pages, pending loads, and total tiles streamed.*
+resident pages, pending loads, and tiles streamed.*
 
+## Build
 
-A pipeline for viewing giant images in OpenGL through a custom
-virtual-texturing (MegaTexture / LibVT-style) renderer: synthesize a
-16384×16384 test image *or* mosaic a folder tree of photos into a 16:9
-giant image, tile it into a pyramid, and orbit it.
-
-## Setup
+Python viewers — that's all you need to get running:
 
 ```sh
 pip install -r requirements.txt
 ```
 
-## 1. `gen_test_image.py`
-
-Writes `test_image_16k.npy` (805 MB memmap, low peak RAM) plus a 2048²
-preview PNG. Pattern: **R = U**, **G = V**, **B = 64px checkerboard + zone
-plate** (radial chirp — the classic aliasing/mip-filter test), with the
-256px tile grid and brighter 1024px grid overlaid.
-
-## 1b. `layout_mosaic.py` — folder tree → 16:9 mosaic
+The C viewers are optional, and need SDL2 plus the ANGLE GLES2 libraries from
+[opengl-for-mac](https://github.com/erik-larsen/opengl-for-mac):
 
 ```sh
-python layout_mosaic.py ~/Pictures/some_tree
-python build_pyramid.py --src some_tree_mosaic.npy
-python vt_viewer.py --pyramid some_tree_mosaic_pyramid
+brew install sdl2
+git clone https://github.com/erik-larsen/opengl-for-mac.git ~/Github/opengl-for-mac
+cd c && OGL_FOR_MAC=~/Github/opengl-for-mac ./build_mac.sh
 ```
 
-Output names derive from the input when `--out` is omitted:
-`<folder>_mosaic.npy` (+ `_preview.png`, `_layout.json`), and
-`build_pyramid.py` writes `<src stem>_pyramid/`.
+## Run
 
-Recursively gathers images (sorted by path, so folders stay grouped) and
-places them with a justified-rows layout — every row spans the full canvas
-width, each image keeps its aspect ratio, and the row height is solved so
-the rows fill a 16:9 canvas. The canvas is auto-sized so every image fits
-at ~its native resolution (rounded up to a 256px multiple, capped at
-4096 tiles = 1048576px per axis — the viewer's feedback pass packs page
-coordinates in 12 bits; disk runs out well before that). Writes the
-mosaic `.npy`, a preview PNG, and a `layout.json`
-manifest of every image's rectangle. Options: `--width` (override the
-auto size), `--gap` (pixel gap between images), `--aspect` (canvas
-aspect as `W:H` or a float, default `16:9` — e.g. `--aspect 3:1` makes
-a mosaic that wraps the sphere viewer's full 360°).
+Always two steps: build a tiled pyramid, then point a viewer at it.
 
-## 2. `build_pyramid.py`
-
-Tiles any rectangular `(H, W, 3)` uint8 `.npy` into a pyramid: L0 = full
-res … Lmax = a single tile (7 levels / 5461 tiles for the square test
-image, 7 levels / 3081 tiles for the 16:9 mosaic). Dimensions that stop
-dividing evenly are handled as partial edge tiles, padded by edge
-replication. Each tile is 256² payload plus a **2px border skirt** baked
-from its neighbors, so the renderer can bilinear-filter anywhere inside a
-tile without seams (that skirt is why stored tiles are 260², not 256²).
-`--format jpg` for smaller tiles.
-
-## 3. `vt_viewer.py`
+**A synthetic test image**, if you have no images handy:
 
 ```sh
-python vt_viewer.py                 # interactive orbit
-python vt_viewer.py --frames 240 --screenshot out.png   # self-test
+./gen_test_image.py     # 16384² test pattern (805 MB .npy)
+./build_pyramid.py      # -> test_image_16k_pyramid/
+./vt_viewer.py          # orbit it
 ```
 
-![1:1 detail](media/detail-1to1.jpg)
-*Zoomed to native resolution: crisp glyph edges and zone-plate rings, with no
-visible seams where tiles meet — the 2px baked borders doing their job.*
-
-Drag = orbit, right-drag/shift-drag = pan, scroll = zoom, click = zoom
-+50% toward the point under the cursor, **F** = freeze/unfreeze
-streaming — freezing pins the current working set: every resident page
-the frozen view doesn't need is evicted (only its tiles + the root
-survive), and the freeze-moment view frustum is drawn as a yellow
-depth-tested wireframe. Fly around and the algorithm is laid bare:
-sharp tiles exactly inside the frustum's footprint, graded coarser with
-distance, root-level blur beyond; unfreeze to watch refinement stream
-back in. **L** = LOD debug overlay, **R** = reset, **ESC** = quit. Same
-keys in the sphere viewer and the C ports.
-
-![Frozen LOD state](media/frozen-lod.jpg)
-*Pressing **F** close-in, then pulling back: only the 49 of 225 pages that the
-frozen view needed survive, so its footprint stays sharp while everything else
-falls back to the coarsest resident ancestor. The yellow wireframe is the
-frustum that made the choice.*
-
-## 3b. `vt_sphere_viewer.py` — the mosaic on a sphere band
+**Your own folder of photos** — any nesting; subfolders stay grouped:
 
 ```sh
-python vt_sphere_viewer.py --pyramid LandWaterSkyScapes_mosaic_pyramid
+./layout_mosaic.py ~/Pictures/some_tree      # -> some_tree_mosaic.npy
+./build_pyramid.py some_tree_mosaic.npy
+./vt_viewer.py        some_tree_mosaic_pyramid   # flat
+./vt_sphere_viewer.py some_tree_mosaic_pyramid   # globe
+```
+
+Add `--aspect 3:1` to `layout_mosaic.py` for a mosaic that wraps the globe a
+full 360°, and `--inside` to the sphere viewer to stand at the centre and look
+out. The C viewers take the same arguments:
+
+```sh
+cd c && ./vt_viewer ../test_image_16k_pyramid
 ```
 
 ![Sphere viewer](media/sphere-viewer.png)
-*The test image on the sphere band — same virtual-texturing core, different
-geometry.*
+*The same virtual-texturing core on a sphere band — only the geometry differs.*
 
-Wraps the mosaic equirectangularly onto a sphere band: latitude ±60°,
-longitude span derived from the image aspect for a distortion-free
-equator (16:9 → ±106.7°; capped at 360°). By default the band is on the
-**outside** of the sphere (globe-style) with the camera orbiting it and
-scroll changing height above the surface; `--inside` puts the camera at
-the sphere's center looking out (panorama-style, scroll = FOV). Drag
-pans azimuth/elevation with trackball inertia — fling and it keeps
-spinning with exponential damping; after ~5s of no input a slow
-auto-rotate kicks in (continuous on a full-wrap band, ping-pong
-otherwise; `--idle-delay`/`--idle-speed`, `--idle-delay 0` disables).
-Clicking finds the image under the cursor in the mosaic's `layout.json`
-and glides the camera (ease-in/out) to center it while zooming +50%; the
-window title shows the clicked file's name. Same virtual-texturing core
-as `vt_viewer.py` — only geometry/camera differ.
+## Controls
 
-## 3c. `c/` — C / SDL2 / GLES2 ports of both viewers
+| input | action |
+| --- | --- |
+| drag | orbit (flat) / look around (sphere) |
+| right-drag, shift-drag | pan (flat viewer) |
+| scroll | zoom |
+| hover | outline the mosaic image under the pointer |
+| click | centre the view on that image, eased |
+| **H** | cycle hover-highlight style |
+| **F** | freeze / unfreeze streaming |
+| **L** | LOD debug overlay |
+| **R**, **ESC** | reset view, quit |
 
-```sh
-cd c && OGL_FOR_MAC=~/Github/opengl-for-mac ./build_mac.sh
-./vt_viewer --pyramid ../test_image_16k_pyramid
-./vt_sphere_viewer --pyramid ../test_tree_mosaic_pyramid [--inside]
-```
+Freezing is the one worth trying first: it pins the working set, evicts every
+page the frozen view doesn't need, and draws the freeze-moment frustum. Fly
+away and the algorithm is laid bare.
 
-Native ports of `vt_viewer.py` and `vt_sphere_viewer.py` on SDL2 +
-OpenGL ES 2.0 (ANGLE, via
-[opengl-for-mac](https://github.com/erik-larsen/opengl-for-mac)):
-`vt_core.c/h` holds the shared VT system (streaming loader thread,
-atlas, page table, shaders), the two `vt_*.c` front-ends the geometry,
-cameras, and input (same controls, click-zoom easing, inertia, idle
-spin, and `--frames/--screenshot` self-tests as the Python versions).
-GLES2 lacks texture arrays / `texelFetch` / integer GLSL ops, so the
-per-level page tables pack into one 2D texture (per-level rects in a
-uniform array) and the feedback pass encodes page IDs with mod/floor
-arithmetic — which incidentally makes the shaders WebGL1-compatible.
-Tiles decode via vendored `stb_image.h`. The build script rewrites the
-ANGLE dylibs' cwd-relative install names to absolute paths and points
-SDL at them, so no `DYLD_FALLBACK_LIBRARY_PATH` is needed.
+![Frozen LOD state](media/frozen-lod.jpg)
+*After **F** close-in, then pulling back: only the 49 of 225 pages the frozen
+view needed survive, so its footprint stays sharp while everything else falls
+back to the coarsest resident ancestor.*
 
-## 4. `export_dzi.py` — pyramid → Deep Zoom (OpenSeadragon)
+Every viewer also runs headless for self-tests:
+`--frames N --screenshot out.png` flies a scripted path, waits for streaming to
+settle, and saves the frame.
 
-```sh
-python export_dzi.py --pyramid test_image_16k_pyramid
-python3 -m http.server        # then open http://localhost:8000/test_image_16k_pyramid_dzi/viewer.html
-```
+---
 
-The pyramid is already ~95% of a Deep Zoom dataset; this re-crops each
-tile to DZI's edge-tile conventions (edge tiles carry overlap only on
-sides with neighbors), flips the level numbering (DZI level N = full res,
-level 0 = 1×1 px) and tile naming (`col_row`), synthesizes the sub-256px
-levels from the root tile, and writes `image.dzi` + `viewer.html` (uses
-OpenSeadragon from CDN).
+## Implementation
 
-How the virtual texturing works:
+### Pipeline
 
-* **Physical atlas** — one 4096² RGB texture holding 15×15 = 225 tile
-  slots of 260² (payload + border). Only these ~15 Mtexels are ever on the
-  GPU, versus 268 Mtexels for the full image.
-* **Page table** — an RGBA8 texture *array* with one layer per pyramid
-  level (an array rather than a mip chain, so non-square page grids with
-  partial edge tiles work); each texel maps a virtual page to (atlas slot
-  x, atlas slot y, resident level). Non-resident pages inherit their
-  finest loaded ancestor's entry, so sampling always succeeds and detail
-  refines progressively as tiles stream in.
-* **Feedback pass** — each frame the scene is re-rendered into a ~256×160
-  offscreen buffer whose shader emits (pageX, pageY, LOD) per pixel; a CPU
-  readback of that buffer yields the exact working set to request.
-* **Streaming** — a background thread decodes tiles (coarse levels first);
-  uploads are budgeted per frame (24) to avoid hitches; LRU eviction
-  reclaims slots when the atlas is full (the root tile is never evicted).
-* **Sampling** — the fragment shader derives LOD from UV derivatives,
-  fetches the page-table entry via `texelFetch`, remaps into the atlas,
-  and blends two adjacent levels (manual trilinear) to hide LOD popping
-  and seams.
+| script | does |
+| --- | --- |
+| `gen_test_image.py` | 16384² pattern: **R** = U, **G** = V, **B** = checkerboard + zone plate (a radial chirp — the classic aliasing test), with every 256px cell labelled `A1`-style so you always know where you are. |
+| `layout_mosaic.py` | Folder tree → one giant mosaic, justified rows (each row spans the full width, aspect preserved). Auto-sizes the canvas so images land at ~native resolution. Writes a `layout.json` of every image's rectangle. `--aspect`, `--width`, `--gap`. |
+| `build_pyramid.py` | Any rectangular `.npy` → tile pyramid, L0 = full res up to a single root tile (7 levels / 5461 tiles for the test image). Partial edge tiles are edge-padded. `--format jpg` for smaller tiles. |
+| `export_dzi.py` | Pyramid → Deep Zoom, viewable in OpenSeadragon in a browser. Re-crops to DZI's edge-tile convention, flips the level numbering, and writes `image.dzi` + a ready `viewer.html`. |
+
+Output names derive from inputs: `<folder>_mosaic.npy` → `<stem>_pyramid/`.
+
+### How the virtual texturing works
+
+* **Physical atlas** — one 4096² texture holding 15×15 = 225 slots of 260².
+  Only ~15 Mtexels are ever on the GPU, versus 268 Mtexels for the full 16k
+  image.
+* **Tile borders** — each tile is 256² of payload plus a 2px skirt baked from
+  its neighbours (hence 260², not 256²), so bilinear filtering never samples
+  across into an unrelated atlas neighbour.
+* **Page table** — one texel per virtual page → (atlas slot x, slot y, resident
+  level). Non-resident pages inherit their finest loaded ancestor, so sampling
+  always succeeds and detail refines progressively instead of popping in.
+* **Feedback pass** — each frame the scene re-renders into a ~256×160 buffer
+  whose shader emits (pageX, pageY, LOD) per pixel; reading it back gives the
+  exact working set, with no guessing about what's visible.
+* **Streaming** — a background thread decodes tiles coarsest-first; uploads are
+  budgeted at 24/frame to avoid hitches; LRU reclaims slots when the atlas
+  fills. The root tile is pinned so the fallback chain always terminates.
+* **Sampling** — the fragment shader derives LOD from UV derivatives and blends
+  two page-table levels (manual trilinear) to hide level seams and popping.
+
+![1:1 detail](media/detail-1to1.jpg)
+*At native resolution: crisp glyph edges and zone-plate rings, no visible seams
+where tiles meet — the baked borders doing their job.*
+
+### Hover highlight
+
+The outline is drawn in the **fragment shader**, not as geometry. The hovered
+rect is a signed distance field in UV space; dividing it by its own
+screen-space gradient (`dFdx`/`dFdy`) converts it to pixels, so one uniform
+yields a constant-width outline at any zoom — and it follows the sphere's
+curvature for free, since the derivatives already encode the bend.
+
+A plain coloured line isn't robust: yellow vanishes on a yellow photo, and pure
+inversion (`1 - dst`, the classic XOR rubber band) disappears against mid-grey.
+**H** cycles the alternatives:
+
+| # | style | trade-off |
+| --- | --- | --- |
+| 1 | flat yellow | the naive baseline — fails on yellow content |
+| 2 | **yellow core + dark halo** *(default)* | dual-contour: one of the two always contrasts, and the hue still reads as "selected" |
+| 3 | contrast-adaptive core | black or white per pixel by local luminance; neutral, but can shimmer along a busy edge |
+| 4 | adaptive + scrim | also dims everything outside — unmistakable, but restyles the whole image |
+| 5 | marching ants | animated dashes; motion is the strongest cue, at the cost of noise |
+
+### C port
+
+`c/vt_core.c` holds the shared system (streaming thread, atlas, page table,
+shaders, manifest); the two front-ends add geometry, camera, and input. GLES2
+has no texture arrays, no `texelFetch`, and no integer GLSL ops, so the
+per-level page tables pack into one 2D texture and the feedback pass encodes
+page IDs with `mod`/`floor` arithmetic — which incidentally leaves the shaders
+WebGL1-compatible. Tiles decode via vendored `stb_image.h`. `build_mac.sh`
+rewrites ANGLE's cwd-relative dylib install names to absolute paths, so no
+`DYLD_FALLBACK_LIBRARY_PATH` is needed at runtime.

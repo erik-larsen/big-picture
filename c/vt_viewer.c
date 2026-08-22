@@ -7,7 +7,9 @@
                      [--end-dist D] [--end-uv U,V] [--click-test]
 
     Controls: drag = orbit | right-drag/shift-drag = pan | scroll = zoom
-              click = zoom +50% toward the point under the cursor
+              hover = outline the mosaic image under the pointer
+              click = center the view on that image (or on the point)
+              H = cycle highlight style
               F = freeze/unfreeze streaming (explore the frozen LOD state)
               L = LOD debug overlay | R = reset camera | ESC = quit
 */
@@ -29,6 +31,12 @@ typedef struct {
     int debug, freeze;
     VtLines lines;
 
+    VtManifest manifest;
+    float hover_uv[4];
+    bool has_hover;
+    int hi_style;
+    double t0;
+
     bool dragging, drag_pan;
     float drag_x, drag_y, press_x, press_y;
     bool has_press;
@@ -45,7 +53,8 @@ typedef struct {
     const char *pyramid, *screenshot;
     int frames;
     float end_dist, end_u, end_v;
-    bool click_test, debug_lod, freeze_test;
+    bool click_test, debug_lod, freeze_test, hover_test;
+    const char *manifest_path;
 } App;
 
 static void compute_mvp(App *a)
@@ -105,26 +114,48 @@ static bool cursor_hit(App *a, float cx, float cy, float out[3])
 static float clampf(float v, float lo, float hi)
 { return v < lo ? lo : v > hi ? hi : v; }
 
-/* zoom by 1.5x keeping the clicked point fixed; eased, compounding */
-static void click_zoom(App *a, float cx, float cy)
+/* eased glide of the orbit target; the camera distance is held */
+static void glide_to(App *a, float x, float z, float duration)
+{
+    memcpy(a->anim.target0, a->target, sizeof a->anim.target0);
+    a->anim.target1[0] = clampf(x, -a->half_x, a->half_x);
+    a->anim.target1[1] = 0.0f;
+    a->anim.target1[2] = clampf(z, -a->half_z, a->half_z);
+    a->anim.dist0 = a->dist;
+    a->anim.dist1 = a->dist;              /* centering only, no zoom */
+    a->anim.t0 = now_seconds();
+    a->anim.dur = duration;
+    a->anim.active = true;
+}
+
+/* centre the view on the clicked point */
+static void center_on_point(App *a, float cx, float cy)
 {
     float hit[3];
-    if (!cursor_hit(a, cx, cy, hit))
+    if (cursor_hit(a, cx, cy, hit))
+        glide_to(a, hit[0], hit[2], 0.4f);
+}
+
+/* cursor -> plane -> mosaic uv -> hovered image rect */
+static void update_hover(App *a, float cx, float cy)
+{
+    float hit[3];
+    a->has_hover = false;
+    if (!a->manifest.rects || !cursor_hit(a, cx, cy, hit))
         return;
-    const float s = 1.0f / 1.5f;
-    float *bt = a->anim.active ? a->anim.target1 : a->target;
-    float bd = a->anim.active ? a->anim.dist1 : a->dist;
-    float t1[3] = {
-        clampf(hit[0] + (bt[0] - hit[0]) * s, -a->half_x, a->half_x), 0,
-        clampf(hit[2] + (bt[2] - hit[2]) * s, -a->half_z, a->half_z),
-    };
-    memcpy(a->anim.target0, a->target, sizeof a->anim.target0);
-    memcpy(a->anim.target1, t1, sizeof a->anim.target1);
-    a->anim.dist0 = a->dist;
-    a->anim.dist1 = fmaxf(bd * s, 0.05f);
-    a->anim.t0 = now_seconds();
-    a->anim.dur = 0.4;
-    a->anim.active = true;
+    float u = (hit[0] + a->half_x) / (2 * a->half_x);
+    float v = (hit[2] + a->half_z) / (2 * a->half_z);
+    a->has_hover = vt_manifest_rect_at(&a->manifest, u, v, a->vt.virt_w,
+                                       a->vt.virt_h, a->hover_uv) >= 0;
+}
+
+/* centre the view on the hovered image */
+static void center_on_hover(App *a, float duration)
+{
+    float cu = (a->hover_uv[0] + a->hover_uv[2]) * 0.5f;
+    float cv = (a->hover_uv[1] + a->hover_uv[3]) * 0.5f;
+    glide_to(a, (cu - 0.5f) * 2 * a->half_x,
+                (cv - 0.5f) * 2 * a->half_z, duration);
 }
 
 static void update_anim(App *a)
@@ -193,6 +224,10 @@ static void handle_events(App *a, bool *running)
                 a->debug ^= 1;
             else if (ev.key.keysym.sym == SDLK_f)
                 toggle_freeze(a);
+            else if (ev.key.keysym.sym == SDLK_h) {
+                a->hi_style = (a->hi_style + 1) % 6;
+                printf("highlight style %d\n", a->hi_style);
+            }
             else if (ev.key.keysym.sym == SDLK_r) {
                 a->anim.active = false;
                 a->yaw = 0.6f; a->pitch = 0.9f; a->dist = 14.0f;
@@ -212,12 +247,19 @@ static void handle_events(App *a, bool *running)
             if (ev.button.button == SDL_BUTTON_LEFT && a->has_press
                     && fabsf(ev.button.x - a->press_x) < 4
                     && fabsf(ev.button.y - a->press_y) < 4
-                    && !(SDL_GetModState() & KMOD_SHIFT))
-                click_zoom(a, ev.button.x, ev.button.y);
+                    && !(SDL_GetModState() & KMOD_SHIFT)) {
+                update_hover(a, ev.button.x, ev.button.y);
+                if (a->has_hover)
+                    center_on_hover(a, 0.45f);
+                else
+                    center_on_point(a, ev.button.x, ev.button.y);
+            }
             a->dragging = false;
             a->has_press = false;
             break;
         case SDL_MOUSEMOTION:
+            if (!a->dragging)
+                update_hover(a, ev.motion.x, ev.motion.y);
             if (a->dragging) {
                 float dx = ev.motion.x - a->drag_x;
                 float dy = ev.motion.y - a->drag_y;
@@ -257,8 +299,10 @@ int main(int argc, char **argv)
 {
     App a;
     memset(&a, 0, sizeof a);
+    vt_argv0 = argv[0];
     a.pyramid = "test_image_16k_pyramid";
     a.frames = -1;
+    a.hi_style = 2;
     a.end_dist = 0.12f;
     a.end_u = 0.625f;
     a.end_v = 0.5625f;
@@ -277,18 +321,28 @@ int main(int argc, char **argv)
             a.click_test = true;
         else if (!strcmp(argv[i], "--freeze-test"))
             a.freeze_test = true;
+        else if (!strcmp(argv[i], "--hover-test"))
+            a.hover_test = true;
+        else if (!strcmp(argv[i], "--manifest") && i + 1 < argc)
+            a.manifest_path = argv[++i];
+        else if (!strcmp(argv[i], "--hi-style") && i + 1 < argc)
+            a.hi_style = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--debug-lod"))
             a.debug_lod = true;
         else if (argv[i][0] != '-')
             a.pyramid = argv[i];
     }
 
+    if (!vt_check_pyramid(a.pyramid))     /* before opening a window */
+        return 1;
     if (!vtw_create(&a.w, "vt viewer (C/GLES2)"))
         return 1;
     SDL_GL_SetSwapInterval(a.frames >= 0 ? 0 : 1);
     if (!vt_init(&a.vt, a.pyramid))
         return 1;
     vt_lines_init(&a.lines);
+    vt_manifest_load(&a.manifest, a.pyramid, a.manifest_path);
+    a.t0 = now_seconds();
 
     a.half_x = 8.0f;
     a.half_z = 8.0f * a.vt.virt_h / a.vt.virt_w;
@@ -339,14 +393,19 @@ int main(int argc, char **argv)
                     running = false;
             } else {
                 int extra = frame - a.frames;
+                if (a.hover_test) {          /* hover the window centre */
+                    int ww, wh;
+                    SDL_GetWindowSize(a.w.win, &ww, &wh);
+                    update_hover(&a, ww / 2.0f, wh / 2.0f);
+                }
                 if (a.click_test
                         && (extra == 20 || extra == 45 || extra == 70)) {
                     int ww, wh;
                     SDL_GetWindowSize(a.w.win, &ww, &wh);
-                    click_zoom(&a, ww / 2.0f, wh / 2.0f);
+                    center_on_point(&a, ww / 2.0f, wh / 2.0f);
                     if (a.anim.active)
-                        printf("click-zoom @center -> dist %.2f\n",
-                               a.anim.dist1);
+                        printf("click -> center (%.2f, %.2f)\n",
+                               a.anim.target1[0], a.anim.target1[2]);
                 }
                 int min_extra = a.click_test ? 90 : 0;
                 if ((extra > min_extra && !a.anim.active
@@ -370,6 +429,9 @@ int main(int argc, char **argv)
         DrawCtx main_ctx = {&a, a.vt.prog_main};
         vt_bind(&a.vt, a.vt.prog_main);
         glUniform1i(glGetUniformLocation(a.vt.prog_main, "uDebug"), a.debug);
+        vt_highlight_uniforms(a.vt.prog_main, a.has_hover ? a.hover_uv : NULL,
+                              a.hi_style, (float)(now_seconds() - a.t0),
+                              a.w.dpi_scale);
         draw_plane(&main_ctx);
         if (a.freeze)
             vt_lines_draw(&a.lines, a.mvp);
