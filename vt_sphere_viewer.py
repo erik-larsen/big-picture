@@ -200,7 +200,16 @@ class SphereViewer:
         self._idle_dir = 1.0
         self._user_moved = False      # auto-orbit stops on first interaction
         self.flat = 0.0               # 0 = sphere, 1 = flat rectangle
-        self.focus = None             # rect of the picture being flattened
+        # Reference size for the flattening ramp, fixed once so the morph
+        # never depends on which picture is centred. Using the largest
+        # rect means every photo is fully flat by the time it fills the
+        # window, including after a double click.
+        if self.manifest:
+            du = max(r["w"] for r in self.manifest) / self.vt.virt_w
+            dv = max(r["h"] for r in self.manifest) / self.vt.virt_h
+        else:
+            du = dv = 1 / 12          # no manifest: a sensible screenful
+        self.ref_rect = (0.0, 0.0, du, dv)
         self._last_click_t = 0.0
         self.flat_w = 2 * self.lon_half * RADIUS
         self.flat_h = 2 * LAT_MAX * RADIUS
@@ -447,32 +456,27 @@ class SphereViewer:
         return max(ph / 2 / tan_v, pw / 2 / tan_h)
 
     def update_flat(self):
-        """Ease the surface from sphere to plane as the centred picture
-        approaches filling the window. Anchored on that picture's centre,
-        so it is the one that ends up flat and true to aspect."""
-        if self.inside or not self.manifest:
+        """Ease the surface flat purely as a function of how close the
+        camera is to the surface. Deliberately not keyed to whichever
+        picture is centred: anchoring on a specific photo made both the
+        anchor and the ramp jump every time one scrolled past the middle
+        of the view. Smooth everywhere beats exact somewhere — and when
+        the view *is* centred on a photo (after a double click) the
+        tangent point lands on it anyway, so that photo still comes out
+        square."""
+        if self.inside:
             self.flat = 0.0
             return
-        u = min(max(0.5 + self.az / (2 * self.lon_half), 0.0), 1.0)
-        v = min(max(0.5 - self.el / (2 * LAT_MAX), 0.0), 1.0)
-        r = rect_at_uv(self.manifest, u, v, self.vt.virt_w, self.vt.virt_h)
-        if r:
-            self.focus = r
-        if not self.focus:
-            self.flat = 0.0
-            return
-        ratio = max(self.height / max(self.fit_height(self.focus), 1e-6), 1e-6)
-        RAMP = 8.0                     # flattening spans 8x .. 1x the fit
+        lo = self.fit_height(self.ref_rect)   # fully flat by here
+        ratio = max(self.height / max(lo, 1e-6), 1e-6)
+        RAMP = 8.0                            # start flattening 8x further
         t = min(max(1.0 - math.log2(ratio) / math.log2(RAMP), 0.0), 1.0)
         self.flat = t * t * (3 - 2 * t)
 
     def focus_lonlat(self):
-        if not self.focus:
-            return self.az, self.el
-        cu = (self.focus[0] + self.focus[2]) / 2
-        cv = (self.focus[1] + self.focus[3]) / 2
-        return ((cu - 0.5) * 2 * self.lon_half,
-                (0.5 - cv) * 2 * LAT_MAX)
+        """Tangent point = where the camera looks. Continuous by
+        construction, so the flattening never snaps sideways."""
+        return self.az, self.el
 
     # ---- click: center the image under the cursor, zoom +50% ----------
     def click_center_zoom(self, cx, cy, duration=0.5, fit=False):
@@ -498,7 +502,6 @@ class SphereViewer:
         zoom = self.fov if self.inside else self.height
         end_zoom = zoom                        # single click: centre only
         if fit and rect and not self.inside:
-            self.focus = rect                  # flatten around this one
             end_zoom = self.fit_height(rect)
         az1 = (cu - 0.5) * 2 * self.lon_half
         el1 = (0.5 - cv) * 2 * LAT_MAX

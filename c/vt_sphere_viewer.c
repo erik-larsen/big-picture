@@ -101,8 +101,7 @@ typedef struct {
     bool click_test, hover_test;
     bool user_moved;            /* auto-orbit stops on first interaction */
     float flat;                 /* 0 = sphere, 1 = flat rectangle */
-    float focus[4];             /* uv rect of the picture being flattened */
-    bool has_focus;
+    float ref_rect[4];          /* fixed size driving the flattening ramp */
     float flat_w, flat_h;
     double last_click_t;
 } App;
@@ -188,42 +187,29 @@ static float fit_height(App *a, const float rect[4])
     return fmaxf(ph / 2 / tan_v, pw / 2 / tan_h);
 }
 
-/* lon/lat of the anchor: the centre of the picture being flattened */
+/* Tangent point = where the camera looks. Continuous by construction,
+   so the flattening never snaps sideways. */
 static void focus_lonlat(App *a, float *lon, float *lat)
 {
-    if (!a->has_focus) {
-        *lon = a->az;
-        *lat = a->el;
-        return;
-    }
-    float cu = (a->focus[0] + a->focus[2]) * 0.5f;
-    float cv = (a->focus[1] + a->focus[3]) * 0.5f;
-    *lon = (cu - 0.5f) * 2 * a->lon_half;
-    *lat = (0.5f - cv) * 2 * LAT_MAX;
+    *lon = a->az;
+    *lat = a->el;
 }
 
-/* ease the surface flat as the centred picture approaches filling the
-   window; anchored on that picture, so it is the one that ends up true */
+/* Ease the surface flat purely as a function of how close the camera is
+   to the surface. Deliberately not keyed to whichever picture is centred:
+   anchoring on a specific photo made both the anchor and the ramp jump
+   every time one scrolled past the middle of the view. Smooth everywhere
+   beats exact somewhere — and when the view *is* centred on a photo
+   (after a double click) the tangent point lands on it anyway. */
 static void update_flat(App *a)
 {
-    if (a->inside || !a->manifest.rects) {
+    if (a->inside) {
         a->flat = 0.0f;
         return;
     }
-    float u = clampf(0.5f + a->az / (2 * a->lon_half), 0.0f, 1.0f);
-    float v = clampf(0.5f - a->el / (2 * LAT_MAX), 0.0f, 1.0f);
-    float r[4];
-    if (vt_manifest_rect_at(&a->manifest, u, v, a->vt.virt_w,
-                            a->vt.virt_h, r) >= 0) {
-        memcpy(a->focus, r, sizeof a->focus);
-        a->has_focus = true;
-    }
-    if (!a->has_focus) {
-        a->flat = 0.0f;
-        return;
-    }
-    float ratio = a->height / fmaxf(fit_height(a, a->focus), 1e-6f);
-    const float RAMP = 8.0f;             /* flattening spans 8x .. 1x fit */
+    float lo = fit_height(a, a->ref_rect);     /* fully flat by here */
+    float ratio = a->height / fmaxf(lo, 1e-6f);
+    const float RAMP = 8.0f;                   /* start 8x further out */
     float t = clampf(1.0f - log2f(fmaxf(ratio, 1e-6f)) / log2f(RAMP),
                      0.0f, 1.0f);
     a->flat = t * t * (3.0f - 2.0f * t);
@@ -351,11 +337,8 @@ static void click_center_zoom(App *a, float cx, float cy, bool fit)
     }
     float zoom = a->inside ? a->fov : a->height;
     float end_zoom = zoom;              /* single click: centre only */
-    if (fit && have_rect && !a->inside) {
-        memcpy(a->focus, rect, sizeof a->focus);
-        a->has_focus = true;
+    if (fit && have_rect && !a->inside)
         end_zoom = fit_height(a, rect);
-    }
     float az1 = (cu - 0.5f) * 2 * a->lon_half;
     float el1 = (0.5f - cv) * 2 * LAT_MAX;
     a->anim.az0 = a->az;
@@ -713,6 +696,19 @@ int main(int argc, char **argv)
     a.vt.prog_fb = vt_compile_program(SPHERE_VS_SRC, vt_fs_feedback_src);
     a.flat_w = 2 * a.lon_half * RADIUS;
     a.flat_h = 2 * LAT_MAX * RADIUS;
+    /* largest rect: every photo is fully flat by the time it fills the
+       window, and the ramp never depends on which one is centred */
+    a.ref_rect[0] = a.ref_rect[1] = 0.0f;
+    a.ref_rect[2] = a.ref_rect[3] = 1.0f / 12;   /* no manifest fallback */
+    if (a.manifest.rects) {
+        int mw = 0, mh = 0;
+        for (int i = 0; i < a.manifest.n; i++) {
+            if (a.manifest.rects[i].w > mw) mw = a.manifest.rects[i].w;
+            if (a.manifest.rects[i].h > mh) mh = a.manifest.rects[i].h;
+        }
+        a.ref_rect[2] = (float)mw / a.vt.virt_w;
+        a.ref_rect[3] = (float)mh / a.vt.virt_h;
+    }
     build_band_mesh(&a);
 
     a.fov = 75.0f;

@@ -127,12 +127,12 @@ cd c && ./vt_viewer ../pics/test_image_16k_pyramid
 | **L** | LOD debug overlay |
 | **R**, **ESC** | reset view, quit |
 
-Zooming into a picture on the globe gradually **de-warps** the surface:
-it eases from sphere to the plane tangent at that picture, so by the time
-the picture fills the window it is flat and in its true aspect ratio — the
+Zooming in gradually **de-warps** the globe: the surface eases from sphere
+to the plane tangent at whatever the camera is looking at, so by the time a
+picture fills the window it is flat and in its true aspect ratio — the
 equirectangular squeeze undone along the way. Zoom back out and it eases
 back into a sphere. It is one continuous morph, not a mode switch; double
-click drives it straight to the flat end.
+click drives it straight to the flat end, landing square on that photo.
 
 The sphere viewer opens in an attract spin — a slow auto-rotate that stops
 for good the moment you touch the view, and comes back on **R**
@@ -207,14 +207,25 @@ where tiles meet — the baked borders doing their job.*
 
 The band is built in the vertex shader rather than baked into the vertex
 buffer, so it can be reshaped per frame. Each vertex computes its sphere
-position and its position on the plane tangent at the focused picture, then
-`mix()`es between them. The two agree exactly at the focus, so the morph is
-continuous there and opens up with distance from it. The blend factor is
-driven by how close the camera is to the height at which the picture would
-exactly fill the window, ramping over the last 8× of approach and eased with
-a smoothstep. Picking blends the same way — ray-sphere and ray-plane hits
-interpolated by the same factor — so the hover outline keeps tracking the
-right photo mid-morph.
+position and its position on the plane tangent at the point the camera is
+aimed at, then `mix()`es between them. The two agree exactly at that point,
+so the morph is continuous there and opens up with distance from it.
+
+Both the tangent point and the blend factor depend only on the camera —
+never on which picture happens to be centred. An earlier version anchored
+on the centred photo and measured the ramp against *its* size, which looked
+right but jerked twice over: the anchor teleported whenever a boundary
+crossed the middle of the view, and the ramp stepped whenever the next
+photo was a different size. Now the anchor is simply the view direction,
+and the ramp is camera height against one reference size fixed at startup
+(the largest rect in the mosaic, so every photo is fully flat by the time
+it fills the window). Panning at a constant height leaves the morph exactly
+unchanged. Smooth everywhere beats exact somewhere — and a double click
+still centres the photo before flattening, so it comes out square anyway.
+
+Picking blends the same way — ray-sphere and ray-plane hits interpolated by
+the same factor — so the hover outline keeps tracking the right photo
+mid-morph.
 
 ### Hover highlight
 
