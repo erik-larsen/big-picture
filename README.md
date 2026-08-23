@@ -5,9 +5,9 @@ single 4096² texture. A MegaTexture / LibVT-style virtual texturing renderer,
 in Python (OpenGL 3.3) and C (SDL2 + OpenGL ES 2.0).
 
 ![Photo globe](pics/screens/photo-globe.jpg)
-*A folder tree of images mosaicked into one giant picture and wrapped onto a
-globe — 300 images, 50 megapixels, of which only 87 of the atlas's 225 pages
-were resident when this frame was drawn.*
+*445 mountain photographs mosaicked into a single 1.7 gigapixel image and
+wrapped onto a globe. Just 92 of the atlas's 225 pages were resident when
+this frame was drawn — reproduce it with the commands below.*
 
 ![Flat viewer](pics/screens/flat-viewer.png)
 *The 16384² synthetic test image, orbited at 1155 fps. The title bar tracks
@@ -52,28 +52,45 @@ without an API key or your own pictures:
 ./vt_sphere_viewer.py pics/phototree_mosaic_pyramid
 ```
 
+![Synthetic card globe](pics/screens/photo-globe-cards.jpg)
+*The same globe built from 300 generated cards instead of photographs.*
+
 Each card is labelled with its folder path, so the globe doubles as a
 readable map of what the layout algorithm did. Same `--seed` and `--count`
 always rebuild the same tree.
 
-**1024 real photographs** — a concrete, non-synthetic example. Needs a free
-[Unsplash API key](https://unsplash.com/developers) (`--source pexels` and
-`--source pixabay` also work):
+**Real photographs** — a concrete, non-synthetic example. It needs a free
+API key, which takes about a minute to get:
+
+1. Sign in or create a free account at
+   [pexels.com/api](https://www.pexels.com/api/).
+2. On that page click **Get Started** and say briefly what you are building.
+3. Copy the key from your API dashboard.
 
 ```sh
-export UNSPLASH_ACCESS_KEY=...
-./fetch_photos.py --count 1024 --budget-mb 250   # -> pics/photos_scenery/
-./layout_mosaic.py pics/photos_scenery --aspect 3:1
-./build_pyramid.py pics/photos_scenery_mosaic.npy
-./vt_sphere_viewer.py pics/photos_scenery_mosaic_pyramid
+export PEXELS_API_KEY=your_key_here
+./fetch_photos.py --source pexels --count 1024 --query mountains --width 2400 --budget-mb 250
+./layout_mosaic.py pics/photos_mountains --aspect 3:1
+./build_pyramid.py pics/photos_mountains_mosaic.npy
+./vt_sphere_viewer.py pics/photos_mountains_mosaic_pyramid
 ```
 
-That's roughly a gigapixel of mosaic wrapped into a full 360° globe, from
-a 250 MB set of photos. `--width` and `--quality` trade photo count against
-per-photo resolution; at a fixed byte budget the total pixel count stays
-about the same either way, so the choice is really "denser mosaic" versus
-"deeper zoom into any one photo". `CREDITS.md` is written alongside the
-photos with a link per photographer.
+`--budget-mb` stops the download once it has 250 MB on disk, so at 2400px
+that lands around 445 photographs rather than the full 1024 — a **1.7
+gigapixel** mosaic (71936×23979), wrapped into a full 360° globe. Pick any
+`--query` you like. `CREDITS.md` is written beside the photos, crediting
+every photographer.
+
+`--source unsplash` and `--source pixabay` work the same way, reading
+`UNSPLASH_ACCESS_KEY` or `PIXABAY_API_KEY` instead.
+
+At a fixed byte budget the total pixel count is roughly constant however you
+split it, so `--count` against `--width` is really a choice between a denser
+mosaic and deeper zoom into any one photo. 2400px is the deep-zoom end: a
+single photograph fills the window at native resolution.
+
+The photographs themselves are not committed — they are one command away,
+and would otherwise weigh on every clone forever.
 
 **Your own folder of photos** — any nesting; subfolders stay grouped:
 
@@ -145,7 +162,7 @@ settle, and saves the frame.
 | --- | --- |
 | `gen_test_image_16k.py` | 16384² pattern: **R** = U, **G** = V, **B** = checkerboard + zone plate (a radial chirp — the classic aliasing test), with every 256px cell labelled `A1`-style so you always know where you are. |
 | `gen_test_image_tree.py` | A synthetic stand-in for a photo collection: gradient cards labelled with their folder path, index, and size, filed into nested subfolders. Deterministic from `--seed`, so the mosaic and pyramid are reproducible byte for byte. |
-| `fetch_photos.py` | Downloads N royalty-free photographs via the official Unsplash, Pexels, or Pixabay API. Each is asked for photos only, so illustrations and AI artwork are excluded server-side. Resumable, and writes `CREDITS.md`/`.json` crediting every photographer. |
+| `fetch_photos.py` | Downloads N royalty-free photographs via the official Unsplash, Pexels, or Pixabay API. Each is asked for photos only, so illustrations and AI artwork are excluded server-side. Resumable, and writes a `CREDITS.md` crediting every photographer. |
 | `layout_mosaic.py` | Folder tree → one giant mosaic, justified rows (each row spans the full width, aspect preserved). Auto-sizes the canvas so images land at ~native resolution. Writes a `layout.json` of every image's rectangle. `--aspect`, `--width`, `--gap`, `--workers`. |
 | `build_pyramid.py` | Any rectangular `.npy` → tile pyramid, L0 = full res up to a single root tile (7 levels / 5461 tiles for the test image). Partial edge tiles are edge-padded. `--format jpg` for smaller tiles, `--workers` for the encode pool. |
 | `export_dzi.py` | Pyramid → Deep Zoom, viewable in OpenSeadragon in a browser. Re-crops to DZI's edge-tile convention, flips the level numbering, and writes `image.dzi` + a ready `viewer.html`. |

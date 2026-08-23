@@ -20,7 +20,7 @@ included, so keep Pixabay downloads out of version control.
 
 Attribution isn't required by any of the three licences, but both the
 Unsplash and Pexels API terms ask for it, and it's the decent thing to
-do — CREDITS.md is written with a link per photo and photographer.
+do — CREDITS.md credits every photographer, with a link.
 
     ./fetch_photos.py --source unsplash --count 512
     ./layout_mosaic.py pics/photos_scenery --aspect 3:1
@@ -152,16 +152,23 @@ SOURCES = {
 
 
 def write_credits(out, source, records):
-    lines = [f"# Photo credits", "",
-             f"{len(records)} photographs fetched from "
-             f"{source.capitalize()} with `fetch_photos.py`.", ""]
+    """One line per photographer rather than per file: attribution is owed
+    to the people, and a 1000-line file nobody reads serves no one."""
+    by_author = {}
     for r in records:
-        who = f"[{r['author']}]({r['author_url']})" if r["author_url"] \
-              else r["author"]
-        lines.append(f"- `{r['file']}` — {who or 'unknown'}"
-                     + (f" ([source]({r['page']}))" if r["page"] else ""))
+        by_author.setdefault((r["author"] or "unknown", r["author_url"]),
+                             []).append(r)
+    lines = ["# Photo credits", "",
+             f"{len(records)} photographs from {source.capitalize()}, "
+             f"fetched with `fetch_photos.py`.", "",
+             f"Attribution is not required by the {source.capitalize()} "
+             "licence, but is offered here with thanks — and their API "
+             "terms ask for it.", ""]
+    for (name, url), rs in sorted(by_author.items()):
+        who = f"[{name}]({url})" if url else name
+        lines.append(f"- {who} — {len(rs)} photo"
+                     + ("s" if len(rs) != 1 else ""))
     (out / "CREDITS.md").write_text("\n".join(lines) + "\n")
-    (out / "CREDITS.json").write_text(json.dumps(records, indent=1))
 
 
 def main():
