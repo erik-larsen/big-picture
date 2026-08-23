@@ -143,6 +143,9 @@ static const char *FS_FB_SRC = VT_GLSL_COMMON
     "                      240.0+l0)/255.0;\n"
     "}\n";
 
+const char *vt_fs_main_src = NULL;        /* set in vt_init */
+const char *vt_fs_feedback_src = NULL;
+
 static GLuint compile_shader(GLenum kind, const char *src)
 {
     GLuint sh = glCreateShader(kind);
@@ -635,11 +638,11 @@ bool vt_check_pyramid(const char *pyramid_dir)
     fprintf(stderr,
         "error: no tile pyramid at '%s' (no meta.json)\n\n"
         "Build one first:\n\n"
-        "    ./gen_test_image.py     # synthetic test image\n"
-        "    ./build_pyramid.py      # -> test_image_16k_pyramid/\n\n"
+        "    ./gen_test_image_16k.py   # synthetic test image\n"
+        "    ./build_pyramid.py        # -> pics/test_image_16k_pyramid/\n\n"
         "...or from your own photos:\n\n"
-        "    ./layout_mosaic.py ~/Pictures/some_tree\n"
-        "    ./build_pyramid.py some_tree_mosaic.npy\n\n"
+        "    ./layout_mosaic.py pics/some_tree\n"
+        "    ./build_pyramid.py pics/some_tree_mosaic.npy\n\n"
         "then point the viewer at the pyramid directory:\n\n"
         "    %s <pyramid_dir>\n", pyramid_dir, vt_argv0);
     return false;
@@ -715,6 +718,8 @@ bool vt_init(VtSystem *vt, const char *pyramid_dir)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, vt->table_w, vt->table_h,
                  0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
 
+    vt_fs_main_src = FS_MAIN_SRC;
+    vt_fs_feedback_src = FS_FB_SRC;
     vt->prog_main = vt_compile_program(VS_SRC, FS_MAIN_SRC);
     vt->prog_fb = vt_compile_program(VS_SRC, FS_FB_SRC);
 

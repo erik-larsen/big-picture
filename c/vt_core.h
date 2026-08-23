@@ -94,6 +94,11 @@ void vt_bind(VtSystem *vt, GLuint prog);
 /* shader helpers */
 GLuint vt_compile_program(const char *vs, const char *fs);
 
+/* the fragment shaders, exposed so a viewer can pair them with its own
+   vertex shader (the sphere viewer generates and morphs its geometry) */
+extern const char *vt_fs_main_src;
+extern const char *vt_fs_feedback_src;
+
 /* yellow frustum wireframe (freeze-LOD visualization) */
 typedef struct {
     GLuint prog, vbo;

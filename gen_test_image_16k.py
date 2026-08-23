@@ -9,6 +9,8 @@ Output is a numpy .npy file (written as a memmap, so peak RAM stays low)
 plus a small PNG preview.
 """
 import argparse
+from pathlib import Path
+
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
@@ -45,9 +47,14 @@ def col_name(i):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--out", default="test_image_16k.npy")
-    ap.add_argument("--preview", default="test_image_preview.png")
+    ap.add_argument("--out", default="pics/test_image_16k.npy")
+    ap.add_argument("--preview", default=None,
+                    help="preview PNG (default: beside --out)")
     args = ap.parse_args()
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if args.preview is None:
+        args.preview = str(out.parent / "test_image_preview.png")
 
     img = np.lib.format.open_memmap(
         args.out, mode="w+", dtype=np.uint8, shape=(SIZE, SIZE, 3)

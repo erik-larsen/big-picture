@@ -5,7 +5,8 @@
     Latitude spans +-60 deg; longitude span comes from the image aspect
     (distortion-free equator, capped at 360). Default view orbits the
     OUTSIDE of the sphere (globe); --inside views from the center.
-    Hovering outlines the image under the pointer; clicking centers it
+    Hovering outlines the image under the pointer; clicking centers it,
+    double-clicking zooms until it fills the window (flattening it)
     (via <pyramid>_layout.json) with an eased glide. Trackball fling inertia and slow
     idle auto-rotate included.
 
@@ -20,6 +21,38 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The band is generated in the vertex shader so it can morph: as you zoom
+   into a picture the surface eases from sphere to the plane tangent at
+   that picture, which also undoes the equirectangular squeeze away from
+   the equator, so the photo ends up flat and in its true aspect ratio. */
+static const char *SPHERE_VS_SRC =
+    "attribute vec3 aPos;\n"
+    "attribute vec2 aUV;\n"
+    "uniform mat4 uMVP;\n"
+    "uniform float uRadius, uLonHalf, uLatMax, uZSign, uFlat;\n"
+    "uniform vec2 uFocus;\n"          /* lon, lat of the anchor */
+    "uniform vec2 uFlatDim;\n"        /* full mosaic size once flat */
+    "varying vec2 vUV;\n"
+    "void main(){\n"
+    "  vUV = aUV;\n"
+    "  float lat = (0.5 - aUV.y) * 2.0 * uLatMax;\n"
+    "  float lon = (aUV.x - 0.5) * 2.0 * uLonHalf;\n"
+    "  vec3 p = uRadius * vec3(cos(lat)*sin(lon), sin(lat),\n"
+    "                          uZSign*cos(lat)*cos(lon));\n"
+    "  if (uFlat > 0.0) {\n"
+    "    float lc = uFocus.x, tc = uFocus.y;\n"
+    "    vec3 n     = vec3(cos(tc)*sin(lc), sin(tc), uZSign*cos(tc)*cos(lc));\n"
+    "    vec3 east  = vec3(cos(lc), 0.0, -uZSign*sin(lc));\n"
+    "    vec3 north = vec3(-sin(tc)*sin(lc), cos(tc), -uZSign*sin(tc)*cos(lc));\n"
+    "    float uc = 0.5 + lc/(2.0*uLonHalf);\n"
+    "    float vc = 0.5 - tc/(2.0*uLatMax);\n"
+    "    vec3 fp = uRadius*n + east*((aUV.x-uc)*uFlatDim.x)\n"
+    "                        + north*((vc-aUV.y)*uFlatDim.y);\n"
+    "    p = mix(p, fp, uFlat);\n"
+    "  }\n"
+    "  gl_Position = uMVP * vec4(p, 1.0);\n"
+    "}\n";
 
 #define LAT_MAX (60.0f * (float)M_PI / 180.0f)
 #define RADIUS 10.0f
@@ -66,6 +99,12 @@ typedef struct {
     int frames;
     float end_fov, end_height, idle_delay, idle_speed;
     bool click_test, hover_test;
+    bool user_moved;            /* auto-orbit stops on first interaction */
+    float flat;                 /* 0 = sphere, 1 = flat rectangle */
+    float focus[4];             /* uv rect of the picture being flattened */
+    bool has_focus;
+    float flat_w, flat_h;
+    double last_click_t;
 } App;
 
 static float clampf(float v, float lo, float hi)
@@ -137,29 +176,63 @@ static void mat4_xform(const float *m, const float *v, float *out)
 }
 
 /* cursor -> ray -> point on band -> mosaic uv; false on miss */
-static bool cursor_uv(App *a, float cx, float cy, float *cu, float *cv)
+/* camera height at which `rect` exactly fills the window */
+static float fit_height(App *a, const float rect[4])
 {
+    float pw = (rect[2] - rect[0]) * a->flat_w;
+    float ph = (rect[3] - rect[1]) * a->flat_h;
     int ww, wh;
     SDL_GetWindowSize(a->w.win, &ww, &wh);
-    if (!ww || !wh)
-        return false;
-    compute_mvp(a);
-    float inv[16];
-    if (!mat4_invert(inv, a->mvp))
-        return false;
-    float nx = 2.0f * cx / ww - 1.0f, ny = 1.0f - 2.0f * cy / wh;
-    float pn[4] = {nx, ny, -1, 1}, pf[4] = {nx, ny, 1, 1};
-    float p0[4], p1[4];
-    mat4_xform(inv, pn, p0);
-    mat4_xform(inv, pf, p1);
-    for (int i = 0; i < 3; i++) {
-        p0[i] /= p0[3];
-        p1[i] /= p1[3];
-    }
-    float d[3] = {p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]};
-    float dn = sqrtf(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
-    d[0] /= dn; d[1] /= dn; d[2] /= dn;
+    float tan_v = tanf(OUT_FOV * (float)M_PI / 360.0f);
+    float tan_h = tan_v * (float)ww / (wh > 0 ? wh : 1);
+    return fmaxf(ph / 2 / tan_v, pw / 2 / tan_h);
+}
 
+/* lon/lat of the anchor: the centre of the picture being flattened */
+static void focus_lonlat(App *a, float *lon, float *lat)
+{
+    if (!a->has_focus) {
+        *lon = a->az;
+        *lat = a->el;
+        return;
+    }
+    float cu = (a->focus[0] + a->focus[2]) * 0.5f;
+    float cv = (a->focus[1] + a->focus[3]) * 0.5f;
+    *lon = (cu - 0.5f) * 2 * a->lon_half;
+    *lat = (0.5f - cv) * 2 * LAT_MAX;
+}
+
+/* ease the surface flat as the centred picture approaches filling the
+   window; anchored on that picture, so it is the one that ends up true */
+static void update_flat(App *a)
+{
+    if (a->inside || !a->manifest.rects) {
+        a->flat = 0.0f;
+        return;
+    }
+    float u = clampf(0.5f + a->az / (2 * a->lon_half), 0.0f, 1.0f);
+    float v = clampf(0.5f - a->el / (2 * LAT_MAX), 0.0f, 1.0f);
+    float r[4];
+    if (vt_manifest_rect_at(&a->manifest, u, v, a->vt.virt_w,
+                            a->vt.virt_h, r) >= 0) {
+        memcpy(a->focus, r, sizeof a->focus);
+        a->has_focus = true;
+    }
+    if (!a->has_focus) {
+        a->flat = 0.0f;
+        return;
+    }
+    float ratio = a->height / fmaxf(fit_height(a, a->focus), 1e-6f);
+    const float RAMP = 8.0f;             /* flattening spans 8x .. 1x fit */
+    float t = clampf(1.0f - log2f(fmaxf(ratio, 1e-6f)) / log2f(RAMP),
+                     0.0f, 1.0f);
+    a->flat = t * t * (3.0f - 2.0f * t);
+}
+
+/* hit the sphere itself */
+static bool uv_sphere(App *a, const float p0[3], const float d[3],
+                      float *cu, float *cv)
+{
     float px, py, pz;
     if (a->inside) {
         px = d[0]; py = d[1]; pz = d[2];
@@ -185,9 +258,83 @@ static bool cursor_uv(App *a, float cx, float cy, float *cu, float *cv)
     return true;
 }
 
+/* hit the tangent plane the surface is flattening onto */
+static bool uv_plane(App *a, const float p0[3], const float d[3],
+                     float *cu, float *cv)
+{
+    float lc, tc;
+    focus_lonlat(a, &lc, &tc);
+    float z = a->inside ? -1.0f : 1.0f;
+    float n[3]     = {cosf(tc)*sinf(lc), sinf(tc), z*cosf(tc)*cosf(lc)};
+    float east[3]  = {cosf(lc), 0.0f, -z*sinf(lc)};
+    float north[3] = {-sinf(tc)*sinf(lc), cosf(tc), -z*sinf(tc)*cosf(lc)};
+    float dn = d[0]*n[0] + d[1]*n[1] + d[2]*n[2];
+    if (fabsf(dn) < 1e-9f)
+        return false;
+    float num = 0.0f;
+    for (int i = 0; i < 3; i++)
+        num += (RADIUS*n[i] - p0[i]) * n[i];
+    float t = num / dn;
+    if (t <= 0)
+        return false;
+    float q[3];
+    for (int i = 0; i < 3; i++)
+        q[i] = p0[i] + t*d[i] - RADIUS*n[i];
+    *cu = 0.5f + lc / (2 * a->lon_half)
+        + (q[0]*east[0] + q[1]*east[1] + q[2]*east[2]) / a->flat_w;
+    *cv = 0.5f - tc / (2 * LAT_MAX)
+        - (q[0]*north[0] + q[1]*north[1] + q[2]*north[2]) / a->flat_h;
+    return true;
+}
+
+/* The surface morphs between sphere and tangent plane, so the pick
+   blends the two by the same factor: exact at either end, and the two
+   agree near the focus in between. */
+static bool cursor_uv(App *a, float cx, float cy, float *cu, float *cv)
+{
+    int ww, wh;
+    SDL_GetWindowSize(a->w.win, &ww, &wh);
+    if (!ww || !wh)
+        return false;
+    compute_mvp(a);
+    float inv[16];
+    if (!mat4_invert(inv, a->mvp))
+        return false;
+    float nx = 2.0f * cx / ww - 1.0f, ny = 1.0f - 2.0f * cy / wh;
+    float pn[4] = {nx, ny, -1, 1}, pf[4] = {nx, ny, 1, 1};
+    float e0[4], e1[4];
+    mat4_xform(inv, pn, e0);
+    mat4_xform(inv, pf, e1);
+    float p0[3], d[3];
+    for (int i = 0; i < 3; i++) {
+        p0[i] = e0[i] / e0[3];
+        d[i] = e1[i] / e1[3] - p0[i];
+    }
+    float dl = sqrtf(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+    for (int i = 0; i < 3; i++)
+        d[i] /= dl;
+
+    float su, sv, pu, pv;
+    bool hs = uv_sphere(a, p0, d, &su, &sv);
+    if (a->flat <= 0.0f) {
+        if (!hs)
+            return false;
+        *cu = su; *cv = sv;
+        return true;
+    }
+    bool hp = uv_plane(a, p0, d, &pu, &pv);
+    if (!hs && !hp)
+        return false;
+    if (!hs) { su = pu; sv = pv; }
+    if (!hp) { pu = su; pv = sv; }
+    *cu = su + (pu - su) * a->flat;
+    *cv = sv + (pv - sv) * a->flat;
+    return *cu >= 0.0f && *cu <= 1.0f && *cv >= 0.0f && *cv <= 1.0f;
+}
+
 /* ---------------------------------------------- click: center + zoom 50% */
 
-static void click_center_zoom(App *a, float cx, float cy)
+static void click_center_zoom(App *a, float cx, float cy, bool fit)
 {
     float cu, cv;
     if (!cursor_uv(a, cx, cy, &cu, &cv))
@@ -195,6 +342,7 @@ static void click_center_zoom(App *a, float cx, float cy)
     float rect[4];
     int hit = vt_manifest_rect_at(&a->manifest, cu, cv, a->vt.virt_w,
                                   a->vt.virt_h, rect);
+    bool have_rect = hit >= 0;
     if (hit >= 0) {                      /* center the image, not the point */
         cu = (rect[0] + rect[2]) * 0.5f;
         cv = (rect[1] + rect[3]) * 0.5f;
@@ -202,6 +350,12 @@ static void click_center_zoom(App *a, float cx, float cy)
                  a->manifest.rects[hit].name);
     }
     float zoom = a->inside ? a->fov : a->height;
+    float end_zoom = zoom;              /* single click: centre only */
+    if (fit && have_rect && !a->inside) {
+        memcpy(a->focus, rect, sizeof a->focus);
+        a->has_focus = true;
+        end_zoom = fit_height(a, rect);
+    }
     float az1 = (cu - 0.5f) * 2 * a->lon_half;
     float el1 = (0.5f - cv) * 2 * LAT_MAX;
     a->anim.az0 = a->az;
@@ -209,7 +363,7 @@ static void click_center_zoom(App *a, float cx, float cy)
     a->anim.el0 = a->el;
     a->anim.el1 = el1;
     a->anim.zoom0 = zoom;
-    a->anim.zoom1 = zoom;                 /* centering only, no zoom */
+    a->anim.zoom1 = end_zoom;
     a->anim.t0 = now_seconds();
     a->anim.dur = 0.5;
     a->anim.active = true;
@@ -257,6 +411,17 @@ static void toggle_freeze(App *a)
     }
 }
 
+/* the camera moves on its own (glides, inertia, attract spin), so what
+   sits under a stationary pointer changes without any mouse event */
+static void refresh_hover(App *a)
+{
+    if (!a->manifest.rects || SDL_GetMouseFocus() != a->w.win)
+        return;
+    int mx, my;
+    SDL_GetMouseState(&mx, &my);
+    update_hover(a, (float)mx, (float)my);
+}
+
 /* ------------------------------------------- inertia + idle auto-rotate */
 
 static void update_free_motion(App *a, float dt)
@@ -280,7 +445,7 @@ static void update_free_motion(App *a, float dt)
             a->az = copysignf(a->lon_half, a->az);
             a->vel_az = 0;
         }
-    } else if (a->idle_delay > 0
+    } else if (a->idle_delay > 0 && !a->user_moved
                && now_seconds() - a->last_input > a->idle_delay) {
         float step = a->idle_speed * (float)M_PI / 180.0f * dt;
         if (full_wrap) {
@@ -307,6 +472,17 @@ static void draw_band(void *arg)
     App *a = c->a;
     vt_bind(&a->vt, c->prog);
     mat4_upload(glGetUniformLocation(c->prog, "uMVP"), a->mvp);
+    float lon_c, lat_c;
+    focus_lonlat(a, &lon_c, &lat_c);
+    glUniform1f(glGetUniformLocation(c->prog, "uRadius"), RADIUS);
+    glUniform1f(glGetUniformLocation(c->prog, "uLonHalf"), a->lon_half);
+    glUniform1f(glGetUniformLocation(c->prog, "uLatMax"), LAT_MAX);
+    glUniform1f(glGetUniformLocation(c->prog, "uZSign"),
+                a->inside ? -1.0f : 1.0f);
+    glUniform1f(glGetUniformLocation(c->prog, "uFlat"), a->flat);
+    glUniform2f(glGetUniformLocation(c->prog, "uFocus"), lon_c, lat_c);
+    glUniform2f(glGetUniformLocation(c->prog, "uFlatDim"),
+                a->flat_w, a->flat_h);
     glBindBuffer(GL_ARRAY_BUFFER, a->vbo);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, a->ebo);
     glEnableVertexAttribArray(0);
@@ -392,10 +568,13 @@ static void handle_events(App *a, bool *running)
                 a->az = a->el = 0;
                 a->fov = 75.0f;
                 a->height = 12.0f;
+                a->vel_az = a->vel_el = 0;
+                a->user_moved = false;   /* back to the opening spin */
             }
             break;
         case SDL_MOUSEBUTTONDOWN:
             a->last_input = now_seconds();
+            a->user_moved = true;
             a->anim.active = false;
             a->vel_az = a->vel_el = 0;
             a->move_t = 0;
@@ -410,7 +589,12 @@ static void handle_events(App *a, bool *running)
                     && fabsf(ev.button.x - a->press_x) < 4
                     && fabsf(ev.button.y - a->press_y) < 4) {
                 a->vel_az = a->vel_el = 0;
-                click_center_zoom(a, ev.button.x, ev.button.y);
+                {
+                    double now = now_seconds();
+                    bool dbl = now - a->last_click_t < 0.35;
+                    a->last_click_t = now;
+                    click_center_zoom(a, ev.button.x, ev.button.y, dbl);
+                }
             } else if (a->move_t == 0
                        || now_seconds() - a->move_t > 0.12) {
                 a->vel_az = a->vel_el = 0;   /* held still: no fling */
@@ -424,6 +608,7 @@ static void handle_events(App *a, bool *running)
             if (a->dragging) {
                 double now = now_seconds();
                 a->last_input = now;
+                a->user_moved = true;
                 float rate = drag_rate(a);
                 float daz = -(ev.motion.x - a->drag_x) * rate;
                 float del = (ev.motion.y - a->drag_y) * rate;
@@ -446,6 +631,7 @@ static void handle_events(App *a, bool *running)
             break;
         case SDL_MOUSEWHEEL:
             a->last_input = now_seconds();
+            a->user_moved = true;
             a->anim.active = false;
             if (a->inside)
                 a->fov = clampf(a->fov * powf(0.92f, ev.wheel.preciseY),
@@ -470,7 +656,7 @@ int main(int argc, char **argv)
     App a;
     memset(&a, 0, sizeof a);
     vt_argv0 = argv[0];
-    a.pyramid = "test_image_16k_pyramid";
+    a.pyramid = "../pics/test_image_16k_pyramid";
     a.frames = -1;
     a.end_fov = 28.0f;
     a.end_height = 1.0f;
@@ -522,6 +708,11 @@ int main(int argc, char **argv)
     a.lon_half = fminf((float)M_PI, LAT_MAX * aspect);
     printf("band: lon +-%.1f deg, lat +-60 deg, %s view\n",
            a.lon_half * 180.0 / M_PI, a.inside ? "inside" : "outside");
+    /* pair the shared fragment shaders with our morphing vertex shader */
+    a.vt.prog_main = vt_compile_program(SPHERE_VS_SRC, vt_fs_main_src);
+    a.vt.prog_fb = vt_compile_program(SPHERE_VS_SRC, vt_fs_feedback_src);
+    a.flat_w = 2 * a.lon_half * RADIUS;
+    a.flat_h = 2 * LAT_MAX * RADIUS;
     build_band_mesh(&a);
 
     a.fov = 75.0f;
@@ -560,7 +751,7 @@ int main(int argc, char **argv)
                         && (extra == 20 || extra == 60 || extra == 100)) {
                     int ww, wh;
                     SDL_GetWindowSize(a.w.win, &ww, &wh);
-                    click_center_zoom(&a, ww * 0.32f, wh * 0.38f);
+                    click_center_zoom(&a, ww * 0.32f, wh * 0.38f, false);
                     if (a.anim.active)
                         printf("click -> %s  az %.1f  el %.1f  zoom %.2f\n",
                                a.last_click[0] ? a.last_click : "(point)",
@@ -576,6 +767,9 @@ int main(int argc, char **argv)
             update_free_motion(&a, dt);
         }
         update_anim(&a);
+        update_flat(&a);
+        if (a.frames < 0)
+            refresh_hover(&a);
         compute_mvp(&a);
 
         if (!a.freeze) {

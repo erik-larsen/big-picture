@@ -149,6 +149,17 @@ static void update_hover(App *a, float cx, float cy)
                                        a->vt.virt_h, a->hover_uv) >= 0;
 }
 
+/* the camera moves on its own (click-to-centre glides), so what sits
+   under a stationary pointer changes without any mouse event */
+static void refresh_hover(App *a)
+{
+    if (!a->manifest.rects || SDL_GetMouseFocus() != a->w.win)
+        return;
+    int mx, my;
+    SDL_GetMouseState(&mx, &my);
+    update_hover(a, (float)mx, (float)my);
+}
+
 /* centre the view on the hovered image */
 static void center_on_hover(App *a, float duration)
 {
@@ -300,7 +311,7 @@ int main(int argc, char **argv)
     App a;
     memset(&a, 0, sizeof a);
     vt_argv0 = argv[0];
-    a.pyramid = "test_image_16k_pyramid";
+    a.pyramid = "../pics/test_image_16k_pyramid";
     a.frames = -1;
     a.hi_style = 2;
     a.end_dist = 0.12f;
@@ -414,6 +425,8 @@ int main(int argc, char **argv)
             }
         }
         update_anim(&a);
+        if (a.frames < 0)
+            refresh_hover(&a);
         compute_mvp(&a);
 
         if (!a.freeze) {

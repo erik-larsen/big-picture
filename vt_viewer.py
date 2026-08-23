@@ -186,13 +186,14 @@ def check_pyramid(pyramid_dir):
     why = (f"'{d}' has no meta.json" if d.is_dir()
            else f"no such directory: '{d}'")
     msg = [f"error: {why}", "", "Build a pyramid first:", "",
-           "    ./gen_test_image.py     # synthetic 16384\u00b2 test image",
-           "    ./build_pyramid.py      # -> test_image_16k_pyramid/", "",
-           "...or from your own photos:", "",
-           "    ./layout_mosaic.py ~/Pictures/some_tree",
-           "    ./build_pyramid.py some_tree_mosaic.npy",
-           f"    ./{Path(sys.argv[0]).name} some_tree_mosaic_pyramid"]
-    here = sorted(p.name for p in Path(".").glob("*_pyramid")
+           "    ./gen_test_image_16k.py   # synthetic 16384\u00b2 test image",
+           "    ./build_pyramid.py        # -> pics/test_image_16k_pyramid/",
+           "", "...or from your own photos:", "",
+           "    ./layout_mosaic.py pics/some_tree",
+           "    ./build_pyramid.py pics/some_tree_mosaic.npy",
+           f"    ./{Path(sys.argv[0]).name} pics/some_tree_mosaic_pyramid"]
+    here = sorted(str(p) for d in (".", "pics")
+                  for p in Path(d).glob("*_pyramid")
                   if (p / "meta.json").exists())
     if here:
         msg += ["", "Pyramids found in this directory:"]
@@ -672,6 +673,15 @@ class Viewer:
             self._drag = None
             self._press = None
 
+    def refresh_hover(self):
+        """Recompute the hovered image from the last cursor position: the
+        camera moves on its own (click-to-centre glides), so what sits
+        under a stationary pointer changes without any mouse event."""
+        if not self.manifest or not glfw.get_window_attrib(self.win,
+                                                           glfw.HOVERED):
+            return
+        self.update_hover(*glfw.get_cursor_pos(self.win))
+
     def update_hover(self, cx, cy):
         hit = self.cursor_hit(cx, cy)
         if hit is None:
@@ -884,6 +894,8 @@ class Viewer:
                     if settled or extra > 600:
                         break
             self.update_zoom_anim()
+            if self.args.frames is None:
+                self.refresh_hover()
             w, h = glfw.get_framebuffer_size(self.win)
             mvp = self.mvp(w, h)
 
@@ -933,7 +945,7 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("pyramid_pos", nargs="?", metavar="PYRAMID",
                     help="pyramid directory (same as --pyramid)")
-    ap.add_argument("--pyramid", default="test_image_16k_pyramid")
+    ap.add_argument("--pyramid", default="pics/test_image_16k_pyramid")
     ap.add_argument("--frames", type=int, default=None,
                     help="run a scripted N-frame orbit and exit (self-test)")
     ap.add_argument("--screenshot", default=None,

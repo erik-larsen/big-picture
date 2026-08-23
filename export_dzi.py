@@ -52,7 +52,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("pyramid_pos", nargs="?", metavar="PYRAMID",
                     help="pyramid directory (same as --pyramid)")
-    ap.add_argument("--pyramid", default="test_image_16k_pyramid")
+    ap.add_argument("--pyramid", default="pics/test_image_16k_pyramid")
     ap.add_argument("--out", default=None,
                     help="output dir (default: <pyramid>_dzi)")
     args = ap.parse_args()
@@ -64,7 +64,7 @@ def main():
     T, B, fmt, n_levels = (meta["tile_size"], meta["border"],
                            meta["format"], meta["levels"])
 
-    out = Path(args.out or f"{pdir.name}_dzi")
+    out = Path(args.out or pdir.parent / f"{pdir.name}_dzi")
     if out.exists():
         shutil.rmtree(out)
     files = out / "image_files"

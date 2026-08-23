@@ -1,15 +1,15 @@
-# big-picture — virtual texturing viewers for giant images
+# big-picture — virtual texturing viewers for giant images and image collections
 
-Explore multi-gigapixel images in real time while the GPU only ever holds a
+Explore multi-gigapixel images and image collections in real time while the GPU only ever holds a
 single 4096² texture. A MegaTexture / LibVT-style virtual texturing renderer,
 in Python (OpenGL 3.3) and C (SDL2 + OpenGL ES 2.0).
 
-![Photo globe](media/photo-globe.jpg)
+![Photo globe](pics/screens/photo-globe.jpg)
 *A folder tree of images mosaicked into one giant picture and wrapped onto a
 globe — 300 images, 50 megapixels, of which only 87 of the atlas's 225 pages
 were resident when this frame was drawn.*
 
-![Flat viewer](media/flat-viewer.png)
+![Flat viewer](pics/screens/flat-viewer.png)
 *The 16384² synthetic test image, orbited at 1155 fps. The title bar tracks
 resident pages, pending loads, and tiles streamed.*
 
@@ -37,18 +37,51 @@ Always two steps: build a tiled pyramid, then point a viewer at it.
 **A synthetic test image**, if you have no images handy:
 
 ```sh
-./gen_test_image.py     # 16384² test pattern (805 MB .npy)
-./build_pyramid.py      # -> test_image_16k_pyramid/
-./vt_viewer.py          # orbit it
+./gen_test_image_16k.py   # 16384² test pattern -> pics/test_image_16k.npy
+./build_pyramid.py        # -> pics/test_image_16k_pyramid/
+./vt_viewer.py            # orbit it
 ```
+
+**A synthetic photo collection**, if you want to exercise the mosaic path
+without an API key or your own pictures:
+
+```sh
+./gen_test_image_tree.py   # 300 labelled cards -> pics/phototree/
+./layout_mosaic.py pics/phototree --aspect 3:1
+./build_pyramid.py pics/phototree_mosaic.npy
+./vt_sphere_viewer.py pics/phototree_mosaic_pyramid
+```
+
+Each card is labelled with its folder path, so the globe doubles as a
+readable map of what the layout algorithm did. Same `--seed` and `--count`
+always rebuild the same tree.
+
+**1024 real photographs** — a concrete, non-synthetic example. Needs a free
+[Unsplash API key](https://unsplash.com/developers) (`--source pexels` and
+`--source pixabay` also work):
+
+```sh
+export UNSPLASH_ACCESS_KEY=...
+./fetch_photos.py --count 1024 --budget-mb 250   # -> pics/photos_scenery/
+./layout_mosaic.py pics/photos_scenery --aspect 3:1
+./build_pyramid.py pics/photos_scenery_mosaic.npy
+./vt_sphere_viewer.py pics/photos_scenery_mosaic_pyramid
+```
+
+That's roughly a gigapixel of mosaic wrapped into a full 360° globe, from
+a 250 MB set of photos. `--width` and `--quality` trade photo count against
+per-photo resolution; at a fixed byte budget the total pixel count stays
+about the same either way, so the choice is really "denser mosaic" versus
+"deeper zoom into any one photo". `CREDITS.md` is written alongside the
+photos with a link per photographer.
 
 **Your own folder of photos** — any nesting; subfolders stay grouped:
 
 ```sh
-./layout_mosaic.py ~/Pictures/some_tree      # -> some_tree_mosaic.npy
-./build_pyramid.py some_tree_mosaic.npy
-./vt_viewer.py        some_tree_mosaic_pyramid   # flat
-./vt_sphere_viewer.py some_tree_mosaic_pyramid   # globe
+./layout_mosaic.py ~/Pictures/some_tree      # -> ~/Pictures/some_tree_mosaic.npy
+./build_pyramid.py ~/Pictures/some_tree_mosaic.npy
+./vt_viewer.py        ~/Pictures/some_tree_mosaic_pyramid   # flat
+./vt_sphere_viewer.py ~/Pictures/some_tree_mosaic_pyramid   # globe
 ```
 
 Add `--aspect 3:1` to `layout_mosaic.py` for a mosaic that wraps the globe a
@@ -56,10 +89,10 @@ full 360°, and `--inside` to the sphere viewer to stand at the centre and look
 out. The C viewers take the same arguments:
 
 ```sh
-cd c && ./vt_viewer ../test_image_16k_pyramid
+cd c && ./vt_viewer ../pics/test_image_16k_pyramid
 ```
 
-![Sphere viewer](media/sphere-viewer.png)
+![Sphere viewer](pics/screens/sphere-viewer.png)
 *The same virtual-texturing core on a sphere band — only the geometry differs.*
 
 ## Controls
@@ -71,16 +104,29 @@ cd c && ./vt_viewer ../test_image_16k_pyramid
 | scroll | zoom |
 | hover | outline the mosaic image under the pointer |
 | click | centre the view on that image, eased |
+| double click | zoom until that image fills the window (sphere viewer) |
 | **H** | cycle hover-highlight style |
 | **F** | freeze / unfreeze streaming |
 | **L** | LOD debug overlay |
 | **R**, **ESC** | reset view, quit |
 
+Zooming into a picture on the globe gradually **de-warps** the surface:
+it eases from sphere to the plane tangent at that picture, so by the time
+the picture fills the window it is flat and in its true aspect ratio — the
+equirectangular squeeze undone along the way. Zoom back out and it eases
+back into a sphere. It is one continuous morph, not a mode switch; double
+click drives it straight to the flat end.
+
+The sphere viewer opens in an attract spin — a slow auto-rotate that stops
+for good the moment you touch the view, and comes back on **R**
+(`--idle-delay 0` disables it). The hover outline tracks the camera, not
+just the pointer, so it keeps up while the globe spins or glides.
+
 Freezing is the one worth trying first: it pins the working set, evicts every
 page the frozen view doesn't need, and draws the freeze-moment frustum. Fly
 away and the algorithm is laid bare.
 
-![Frozen LOD state](media/frozen-lod.jpg)
+![Frozen LOD state](pics/screens/frozen-lod.jpg)
 *After **F** close-in, then pulling back: only the 49 of 225 pages the frozen
 view needed survive, so its footprint stays sharp while everything else falls
 back to the coarsest resident ancestor.*
@@ -97,12 +143,24 @@ settle, and saves the frame.
 
 | script | does |
 | --- | --- |
-| `gen_test_image.py` | 16384² pattern: **R** = U, **G** = V, **B** = checkerboard + zone plate (a radial chirp — the classic aliasing test), with every 256px cell labelled `A1`-style so you always know where you are. |
-| `layout_mosaic.py` | Folder tree → one giant mosaic, justified rows (each row spans the full width, aspect preserved). Auto-sizes the canvas so images land at ~native resolution. Writes a `layout.json` of every image's rectangle. `--aspect`, `--width`, `--gap`. |
-| `build_pyramid.py` | Any rectangular `.npy` → tile pyramid, L0 = full res up to a single root tile (7 levels / 5461 tiles for the test image). Partial edge tiles are edge-padded. `--format jpg` for smaller tiles. |
+| `gen_test_image_16k.py` | 16384² pattern: **R** = U, **G** = V, **B** = checkerboard + zone plate (a radial chirp — the classic aliasing test), with every 256px cell labelled `A1`-style so you always know where you are. |
+| `gen_test_image_tree.py` | A synthetic stand-in for a photo collection: gradient cards labelled with their folder path, index, and size, filed into nested subfolders. Deterministic from `--seed`, so the mosaic and pyramid are reproducible byte for byte. |
+| `fetch_photos.py` | Downloads N royalty-free photographs via the official Unsplash, Pexels, or Pixabay API. Each is asked for photos only, so illustrations and AI artwork are excluded server-side. Resumable, and writes `CREDITS.md`/`.json` crediting every photographer. |
+| `layout_mosaic.py` | Folder tree → one giant mosaic, justified rows (each row spans the full width, aspect preserved). Auto-sizes the canvas so images land at ~native resolution. Writes a `layout.json` of every image's rectangle. `--aspect`, `--width`, `--gap`, `--workers`. |
+| `build_pyramid.py` | Any rectangular `.npy` → tile pyramid, L0 = full res up to a single root tile (7 levels / 5461 tiles for the test image). Partial edge tiles are edge-padded. `--format jpg` for smaller tiles, `--workers` for the encode pool. |
 | `export_dzi.py` | Pyramid → Deep Zoom, viewable in OpenSeadragon in a browser. Re-crops to DZI's edge-tile convention, flips the level numbering, and writes `image.dzi` + a ready `viewer.html`. |
 
-Output names derive from inputs: `<folder>_mosaic.npy` → `<stem>_pyramid/`.
+Output names and locations derive from the input: a photo folder yields
+`<folder>_mosaic.npy` beside it, which yields `<stem>_pyramid/` beside that.
+Everything in this repo lives under `pics/`, so the whole chain stays there.
+
+Both stages run a thread pool, defaulting to half the cores. Placement and
+tile-cutting are embarrassingly parallel — each image and each tile row owns
+a disjoint slice of the output — and Pillow drops the GIL while decoding and
+encoding, so threads genuinely overlap. On a 10-core M-series Air, tiling a
+386 Mpx mosaic goes 40s → 20s → 11s → 7.9s at 1/2/5/10 workers: PNG encoding
+is the bottleneck, not the NVMe. The mosaic stage gains less (1.8×) because
+it is dominated by writing the multi-gigabyte `.npy`.
 
 ### How the virtual texturing works
 
@@ -124,9 +182,22 @@ Output names derive from inputs: `<folder>_mosaic.npy` → `<stem>_pyramid/`.
 * **Sampling** — the fragment shader derives LOD from UV derivatives and blends
   two page-table levels (manual trilinear) to hide level seams and popping.
 
-![1:1 detail](media/detail-1to1.jpg)
+![1:1 detail](pics/screens/detail-1to1.jpg)
 *At native resolution: crisp glyph edges and zone-plate rings, no visible seams
 where tiles meet — the baked borders doing their job.*
+
+### De-warping the globe
+
+The band is built in the vertex shader rather than baked into the vertex
+buffer, so it can be reshaped per frame. Each vertex computes its sphere
+position and its position on the plane tangent at the focused picture, then
+`mix()`es between them. The two agree exactly at the focus, so the morph is
+continuous there and opens up with distance from it. The blend factor is
+driven by how close the camera is to the height at which the picture would
+exactly fill the window, ramping over the last 8× of approach and eased with
+a smoothstep. Picking blends the same way — ray-sphere and ray-plane hits
+interpolated by the same factor — so the hover outline keeps tracking the
+right photo mid-morph.
 
 ### Hover highlight
 

@@ -15,12 +15,19 @@ to its rectangle in the mosaic.
 import argparse
 import json
 import math
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
+
+
+def default_workers():
+    return max(1, (os.cpu_count() or 2) // 2)
 
 
 def gather(src_dir):
@@ -70,6 +77,8 @@ def main():
                          "(e.g. 16:9, 3:1, 2.35)")
     ap.add_argument("--gap", type=int, default=8,
                     help="visual gap between images, in pixels")
+    ap.add_argument("--workers", type=int, default=default_workers(),
+                    help="decode/resize threads (default: half the cores)")
     ap.add_argument("--preview", default=None,
                     help="preview PNG (default: <out stem>_preview.png)")
     ap.add_argument("--manifest", default=None,
@@ -77,7 +86,8 @@ def main():
     args = ap.parse_args()
 
     if args.out is None:
-        args.out = f"{Path(args.src).resolve().name}_mosaic.npy"
+        src = Path(args.src).resolve()   # keep outputs beside their input
+        args.out = str(src.parent / f"{src.name}_mosaic.npy")
     stem = Path(args.out).with_suffix("")
     if args.preview is None:
         args.preview = f"{stem}_preview.png"
@@ -113,34 +123,50 @@ def main():
     H = max(round(W / aspect), 256)
     scale = math.sqrt(W * H / sum(it["w"] * it["h"] for it in items))
     print(f"{len(items)} images -> {W}x{H} mosaic "
-          f"({args.aspect}, ~{scale:.2f}x native scale)")
+          f"({args.aspect}, ~{scale:.2f}x native scale, "
+          f"{args.workers} workers)")
 
     canvas = np.lib.format.open_memmap(
         args.out, mode="w+", dtype=np.uint8, shape=(H, W, 3))
     canvas[:] = (18, 18, 20)
 
+    # 1. solve every placement first, so the manifest order is stable
+    #    and the decode work becomes an embarrassingly parallel list
     manifest, g = [], args.gap // 2
     y = 0.0
-    rows = layout_rows(items, W, H)
-    for ri, (rh, row) in enumerate(rows):
+    for rh, row in layout_rows(items, W, H):
         x, y0, y1 = 0.0, round(y), round(y + rh)
         for it in row:
             x0, x1 = round(x), round(x + it["aspect"] * rh)
             x += it["aspect"] * rh
             ix0, ix1 = min(x0 + g, W), min(x1 - g, W)
             iy0, iy1 = y0 + g, min(y1 - g, H)
-            if ix1 - ix0 < 2 or iy1 - iy0 < 2:
-                continue
-            with Image.open(it["path"]) as im:
-                im.draft("RGB", ((ix1 - ix0) * 2, (iy1 - iy0) * 2))
-                tile = im.convert("RGB").resize(
-                    (ix1 - ix0, iy1 - iy0), Image.LANCZOS)
-            canvas[iy0:iy1, ix0:ix1] = np.asarray(tile)
-            manifest.append({"path": str(it["path"]),
-                             "x": ix0, "y": iy0,
-                             "w": ix1 - ix0, "h": iy1 - iy0})
+            if ix1 - ix0 >= 2 and iy1 - iy0 >= 2:
+                manifest.append({"path": str(it["path"]),
+                                 "x": ix0, "y": iy0,
+                                 "w": ix1 - ix0, "h": iy1 - iy0})
         y += rh
-        print(f"row {ri + 1}/{len(rows)}", end="\r", flush=True)
+
+    # 2. decode/resize/blit in parallel. Each image owns a disjoint
+    #    rectangle of the memmap, so the writes need no locking, and
+    #    Pillow drops the GIL for the decode and resample.
+    done, lock = [0], threading.Lock()
+
+    def place(m):
+        with Image.open(m["path"]) as im:
+            im.draft("RGB", (m["w"] * 2, m["h"] * 2))
+            tile = im.convert("RGB").resize((m["w"], m["h"]), Image.LANCZOS)
+        canvas[m["y"]:m["y"] + m["h"], m["x"]:m["x"] + m["w"]] = \
+            np.asarray(tile)
+        with lock:
+            done[0] += 1
+            if done[0] % 25 == 0 or done[0] == len(manifest):
+                print(f"placed {done[0]}/{len(manifest)}",
+                      end="\r", flush=True)
+
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        for _ in pool.map(place, manifest):
+            pass
 
     canvas.flush()
     prev = canvas[::8, ::8]

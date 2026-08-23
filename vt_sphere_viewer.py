@@ -23,6 +23,7 @@ virtual texturing doesn't care what geometry the UVs live on.
 Controls: drag = orbit / look around | scroll = zoom
           hover = outline the mosaic image under the pointer
           click = center the view on the clicked image
+          double click = zoom until it fills the window (flattening it)
           H = cycle highlight style
           F = freeze/unfreeze streaming (explore the frozen LOD state)
           L = LOD debug overlay | R = reset view | ESC = quit
@@ -42,6 +43,43 @@ from PIL import Image
 from vt_viewer import (VERT, FRAG_MAIN, FRAG_FEEDBACK, FrustumLines,
                        VirtualTexture, compile_program, perspective, look_at,
                        rect_at_uv, HI_STYLES, check_pyramid)
+
+# The band is generated in the vertex shader so it can morph: as you zoom
+# into a picture the surface eases from sphere to the plane tangent at that
+# picture, which also undoes the equirectangular squeeze away from the
+# equator, so the photo ends up flat and in its true aspect ratio.
+SPHERE_VERT = """#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec2 aUV;
+uniform mat4 uMVP;
+uniform float uRadius, uLonHalf, uLatMax, uZSign, uFlat;
+uniform vec2 uFocus;      // lon, lat of the flattening anchor
+uniform vec2 uFlatDim;    // full mosaic size once flat
+out vec2 vUV;
+
+void main() {
+    vUV = aUV;
+    float lat = (0.5 - aUV.y) * 2.0 * uLatMax;
+    float lon = (aUV.x - 0.5) * 2.0 * uLonHalf;
+    vec3 p = uRadius * vec3(cos(lat) * sin(lon), sin(lat),
+                            uZSign * cos(lat) * cos(lon));
+    if (uFlat > 0.0) {
+        float lc = uFocus.x, tc = uFocus.y;
+        vec3 n     = vec3(cos(tc) * sin(lc), sin(tc),
+                          uZSign * cos(tc) * cos(lc));
+        vec3 east  = vec3(cos(lc), 0.0, -uZSign * sin(lc));
+        vec3 north = vec3(-sin(tc) * sin(lc), cos(tc),
+                          -uZSign * sin(tc) * cos(lc));
+        float uc = 0.5 + lc / (2.0 * uLonHalf);
+        float vc = 0.5 - tc / (2.0 * uLatMax);
+        vec3 flat_p = uRadius * n
+                    + east  * ((aUV.x - uc) * uFlatDim.x)
+                    + north * ((vc - aUV.y) * uFlatDim.y);
+        p = mix(p, flat_p, uFlat);
+    }
+    gl_Position = uMVP * vec4(p, 1.0);
+}
+"""
 
 LAT_MAX = math.radians(60.0)
 RADIUS = 10.0
@@ -93,8 +131,8 @@ class SphereViewer:
         glfw.make_context_current(self.win)
         glfw.swap_interval(0 if args.frames else 1)
 
-        self.prog_main = compile_program(VERT, FRAG_MAIN)
-        self.prog_fb = compile_program(VERT, FRAG_FEEDBACK)
+        self.prog_main = compile_program(SPHERE_VERT, FRAG_MAIN)
+        self.prog_fb = compile_program(SPHERE_VERT, FRAG_FEEDBACK)
         self.frustum = FrustumLines()
         self.vt = VirtualTexture(args.pyramid)
         self.manifest = self.load_manifest()
@@ -160,6 +198,12 @@ class SphereViewer:
         self._move_t = None           # time of last drag movement
         self._last_input = time.time()
         self._idle_dir = 1.0
+        self._user_moved = False      # auto-orbit stops on first interaction
+        self.flat = 0.0               # 0 = sphere, 1 = flat rectangle
+        self.focus = None             # rect of the picture being flattened
+        self._last_click_t = 0.0
+        self.flat_w = 2 * self.lon_half * RADIUS
+        self.flat_h = 2 * LAT_MAX * RADIUS
         glfw.set_mouse_button_callback(self.win, self.on_mouse_button)
         glfw.set_cursor_pos_callback(self.win, self.on_cursor)
         glfw.set_scroll_callback(self.win, self.on_scroll)
@@ -200,26 +244,15 @@ class SphereViewer:
             proj = perspective(OUT_FOV, w / h, 0.01, 200.0)
         return proj @ view
 
-    def cursor_uv(self, cx, cy):
-        """Cursor -> ray -> point on band -> mosaic uv (or None)."""
-        w, h = glfw.get_window_size(self.win)
-        if w == 0 or h == 0:
-            return None
-        inv = np.linalg.inv(self.mvp(w, h).astype(np.float64))
-        ndc = (2 * cx / w - 1, 1 - 2 * cy / h)
-        a = inv @ np.array([ndc[0], ndc[1], -1, 1.0])
-        b = inv @ np.array([ndc[0], ndc[1], 1, 1.0])
-        p0 = a[:3] / a[3]
-        d = b[:3] / b[3] - p0
-        d /= np.linalg.norm(d)
+    def _uv_sphere(self, p0, d):
         if self.inside:
             p = d * RADIUS
         else:                                   # near ray-sphere hit
-            bb = np.dot(p0, d)
-            disc = bb * bb - (np.dot(p0, p0) - RADIUS ** 2)
+            b = float(np.dot(p0, d))
+            disc = b * b - (float(np.dot(p0, p0)) - RADIUS ** 2)
             if disc < 0:
                 return None
-            t = -bb - math.sqrt(disc)
+            t = -b - math.sqrt(disc)
             if t <= 0:
                 return None
             p = p0 + t * d
@@ -230,10 +263,61 @@ class SphereViewer:
         return (0.5 + lon / (2 * self.lon_half),
                 0.5 - lat / (2 * LAT_MAX))
 
+    def _uv_plane(self, p0, d):
+        """Hit the tangent plane the surface is flattening onto."""
+        lc, tc = self.focus_lonlat()
+        z = -1.0 if self.inside else 1.0
+        n = np.array([math.cos(tc) * math.sin(lc), math.sin(tc),
+                      z * math.cos(tc) * math.cos(lc)])
+        east = np.array([math.cos(lc), 0.0, -z * math.sin(lc)])
+        north = np.array([-math.sin(tc) * math.sin(lc), math.cos(tc),
+                          -z * math.sin(tc) * math.cos(lc)])
+        dn = float(np.dot(d, n))
+        if abs(dn) < 1e-9:
+            return None
+        t = float(np.dot(RADIUS * n - p0, n)) / dn
+        if t <= 0:
+            return None
+        q = p0 + t * d - RADIUS * n
+        return (0.5 + lc / (2 * self.lon_half)
+                + float(np.dot(q, east)) / self.flat_w,
+                0.5 - tc / (2 * LAT_MAX)
+                - float(np.dot(q, north)) / self.flat_h)
+
+    def cursor_uv(self, cx, cy):
+        """Cursor -> ray -> mosaic uv. The surface morphs between sphere
+        and tangent plane, so the pick blends the two by the same factor:
+        exact at either end, and the two agree near the focus between."""
+        w, h = glfw.get_window_size(self.win)
+        if w == 0 or h == 0:
+            return None
+        inv = np.linalg.inv(self.mvp(w, h).astype(np.float64))
+        nx, ny = 2 * cx / w - 1, 1 - 2 * cy / h
+        a = inv @ np.array([nx, ny, -1, 1.0])
+        b = inv @ np.array([nx, ny, 1, 1.0])
+        p0 = a[:3] / a[3]
+        d = b[:3] / b[3] - p0
+        d /= np.linalg.norm(d)
+
+        uv_s = self._uv_sphere(p0, d)
+        if self.flat <= 0.0:
+            return uv_s
+        uv_p = self._uv_plane(p0, d)
+        if uv_s is None or uv_p is None:
+            uv = uv_p if uv_s is None else uv_s
+        else:
+            f = self.flat
+            uv = (uv_s[0] + (uv_p[0] - uv_s[0]) * f,
+                  uv_s[1] + (uv_p[1] - uv_s[1]) * f)
+        if uv is None or not (0.0 <= uv[0] <= 1.0 and 0.0 <= uv[1] <= 1.0):
+            return None
+        return uv
+
     # ---- input ---------------------------------------------------------
     def on_mouse_button(self, win, button, action, mods):
         pos = glfw.get_cursor_pos(win)
         self._last_input = time.time()
+        self._user_moved = True
         if action == glfw.PRESS:
             self._anim = None
             self._vel = [0.0, 0.0]    # grabbing stops the spin
@@ -245,7 +329,10 @@ class SphereViewer:
                     and abs(pos[0] - self._press[0]) < 4
                     and abs(pos[1] - self._press[1]) < 4):
                 self._vel = [0.0, 0.0]
-                self.click_center_zoom(*pos)
+                now = time.time()
+                dbl = now - self._last_click_t < 0.35
+                self._last_click_t = now
+                self.click_center_zoom(*pos, fit=dbl)
             elif (self._move_t is None
                     or time.time() - self._move_t > 0.12):
                 self._vel = [0.0, 0.0]  # held still before release: no fling
@@ -256,6 +343,15 @@ class SphereViewer:
         if self.inside:
             return 0.0025 * self.fov / 70.0     # slower when zoomed in
         return 0.005 * min(max(self.height / RADIUS, 0.03), 1.5)
+
+    def refresh_hover(self):
+        """Recompute the hovered image from the last cursor position: the
+        camera moves on its own (glides, inertia, attract spin), so what
+        sits under a stationary pointer changes without any mouse event."""
+        if not self.manifest or not glfw.get_window_attrib(self.win,
+                                                           glfw.HOVERED):
+            return
+        self.update_hover(*glfw.get_cursor_pos(self.win))
 
     def update_hover(self, cx, cy):
         uv = self.cursor_uv(cx, cy)
@@ -281,6 +377,7 @@ class SphereViewer:
             return
         now = time.time()
         self._last_input = now
+        self._user_moved = True
         px, py = self._drag
         self._drag = (x, y)
         rate = self.drag_rate()
@@ -301,6 +398,7 @@ class SphereViewer:
     def on_scroll(self, win, dx, dy):
         self._anim = None
         self._last_input = time.time()
+        self._user_moved = True
         if self.inside:
             self.fov = min(max(self.fov * (0.92 ** dy), 3.0), 110.0)
         else:
@@ -323,6 +421,8 @@ class SphereViewer:
             self._anim = None
             self.az, self.el = 0.0, 0.0
             self.fov, self.height = 75.0, 12.0
+            self._vel = [0.0, 0.0]
+            self._user_moved = False       # back to the opening attract spin
 
     def toggle_freeze(self):
         self.freeze ^= 1
@@ -337,12 +437,52 @@ class SphereViewer:
             self.frustum.capture(self.mvp(w, h), eye, near, far)
             self.vt.evict_unused()         # keep only this view's pages
 
+    def fit_height(self, rect):
+        """Camera height at which `rect` exactly fills the window."""
+        pw = (rect[2] - rect[0]) * self.flat_w
+        ph = (rect[3] - rect[1]) * self.flat_h
+        w, h = glfw.get_framebuffer_size(self.win)
+        tan_v = math.tan(math.radians(OUT_FOV) / 2)
+        tan_h = tan_v * (w / max(h, 1))
+        return max(ph / 2 / tan_v, pw / 2 / tan_h)
+
+    def update_flat(self):
+        """Ease the surface from sphere to plane as the centred picture
+        approaches filling the window. Anchored on that picture's centre,
+        so it is the one that ends up flat and true to aspect."""
+        if self.inside or not self.manifest:
+            self.flat = 0.0
+            return
+        u = min(max(0.5 + self.az / (2 * self.lon_half), 0.0), 1.0)
+        v = min(max(0.5 - self.el / (2 * LAT_MAX), 0.0), 1.0)
+        r = rect_at_uv(self.manifest, u, v, self.vt.virt_w, self.vt.virt_h)
+        if r:
+            self.focus = r
+        if not self.focus:
+            self.flat = 0.0
+            return
+        ratio = max(self.height / max(self.fit_height(self.focus), 1e-6), 1e-6)
+        RAMP = 8.0                     # flattening spans 8x .. 1x the fit
+        t = min(max(1.0 - math.log2(ratio) / math.log2(RAMP), 0.0), 1.0)
+        self.flat = t * t * (3 - 2 * t)
+
+    def focus_lonlat(self):
+        if not self.focus:
+            return self.az, self.el
+        cu = (self.focus[0] + self.focus[2]) / 2
+        cv = (self.focus[1] + self.focus[3]) / 2
+        return ((cu - 0.5) * 2 * self.lon_half,
+                (0.5 - cv) * 2 * LAT_MAX)
+
     # ---- click: center the image under the cursor, zoom +50% ----------
-    def click_center_zoom(self, cx, cy, duration=0.5):
+    def click_center_zoom(self, cx, cy, duration=0.5, fit=False):
+        """Single click centres the picture; a double click also zooms in
+        until it exactly fills the window."""
         uv = self.cursor_uv(cx, cy)
         if uv is None:
             return
         cu, cv = uv
+        rect = None
         if self.manifest:
             px, py = cu * self.vt.virt_w, cv * self.vt.virt_h
             for r in self.manifest:
@@ -350,16 +490,23 @@ class SphereViewer:
                         and r["y"] <= py < r["y"] + r["h"]):
                     cu = (r["x"] + r["w"] / 2) / self.vt.virt_w
                     cv = (r["y"] + r["h"] / 2) / self.vt.virt_h
+                    rect = (r["x"] / self.vt.virt_w, r["y"] / self.vt.virt_h,
+                            (r["x"] + r["w"]) / self.vt.virt_w,
+                            (r["y"] + r["h"]) / self.vt.virt_h)
                     self._last_click = Path(r["path"]).name
                     break
         zoom = self.fov if self.inside else self.height
+        end_zoom = zoom                        # single click: centre only
+        if fit and rect and not self.inside:
+            self.focus = rect                  # flatten around this one
+            end_zoom = self.fit_height(rect)
         az1 = (cu - 0.5) * 2 * self.lon_half
         el1 = (0.5 - cv) * 2 * LAT_MAX
         self._anim = {
             "t": time.time(), "dur": duration,
             "az0": self.az, "az1": self.az + wrap_pi(az1 - self.az),
             "el0": self.el, "el1": el1,
-            "zoom0": zoom, "zoom1": zoom,      # centering only, no zoom
+            "zoom0": zoom, "zoom1": end_zoom,
         }
 
     def update_free_motion(self, dt):
@@ -382,7 +529,7 @@ class SphereViewer:
             elif abs(self.az) > self.lon_half:      # bump the band edge
                 self.az = math.copysign(self.lon_half, self.az)
                 self._vel[0] = 0.0
-        elif (self.args.idle_delay > 0
+        elif (self.args.idle_delay > 0 and not self._user_moved
               and time.time() - self._last_input > self.args.idle_delay):
             step = math.radians(self.args.idle_speed) * dt
             if full_wrap:
@@ -413,6 +560,16 @@ class SphereViewer:
     # ---- frame loop ----------------------------------------------------
     def draw(self, prog, mvp):
         self.vt.bind(prog)
+        lon_c, lat_c = self.focus_lonlat()
+        glUniform1f(glGetUniformLocation(prog, "uRadius"), RADIUS)
+        glUniform1f(glGetUniformLocation(prog, "uLonHalf"), self.lon_half)
+        glUniform1f(glGetUniformLocation(prog, "uLatMax"), LAT_MAX)
+        glUniform1f(glGetUniformLocation(prog, "uZSign"),
+                    -1.0 if self.inside else 1.0)
+        glUniform1f(glGetUniformLocation(prog, "uFlat"), self.flat)
+        glUniform2f(glGetUniformLocation(prog, "uFocus"), lon_c, lat_c)
+        glUniform2f(glGetUniformLocation(prog, "uFlatDim"),
+                    self.flat_w, self.flat_h)
         glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"), 1, GL_TRUE, mvp)
         glBindVertexArray(self.vao)
         glDrawElements(GL_TRIANGLES, self.n_idx, GL_UNSIGNED_INT, None)
@@ -475,6 +632,9 @@ class SphereViewer:
                     if settled or extra > 600:
                         break
             self.update_anim()
+            self.update_flat()
+            if self.args.frames is None:
+                self.refresh_hover()
             w, h = glfw.get_framebuffer_size(self.win)
             mvp = self.mvp(w, h)
 
@@ -525,7 +685,7 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("pyramid_pos", nargs="?", metavar="PYRAMID",
                     help="pyramid directory (same as --pyramid)")
-    ap.add_argument("--pyramid", default="test_image_16k_pyramid")
+    ap.add_argument("--pyramid", default="pics/test_image_16k_pyramid")
     ap.add_argument("--inside", action="store_true",
                     help="view from the sphere's center (panorama mode)")
     ap.add_argument("--manifest", default=None,
