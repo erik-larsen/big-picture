@@ -162,10 +162,10 @@ cd ../big-picture-tiles && git checkout --orphan new && git add -A \
 | **L** | LOD debug overlay |
 | **R**, **ESC** | reset view, quit |
 
-Zooming in gradually **de-warps** the globe: the surface eases from sphere
-to the plane tangent at whatever the camera is looking at, so by the time a
-picture fills the window it is flat and in its true aspect ratio — the
-equirectangular squeeze undone along the way. Zoom back out and it eases
+Zooming in gradually **de-warps** the globe: once it fills the window, the
+surface eases from sphere to the plane tangent at whatever the camera is
+looking at, so by the time a picture fills the window it is flat and in its
+true aspect ratio — the equirectangular squeeze undone along the way. Zoom back out and it eases
 back into a sphere. It is one continuous morph, not a mode switch; double
 click drives it straight to the flat end, landing square on that photo.
 
@@ -247,6 +247,21 @@ position and its position on the plane tangent at the point the camera is
 aimed at, then `mix()`es between them. The two agree exactly at that point,
 so the morph is continuous there and opens up with distance from it.
 
+Only the part of the globe the window can see takes part. The weight is
+full out to the arc where the window's corner ray meets the sphere, then
+fades to zero over a further band, so the transition always lies past the
+edge of the screen. Mixing the whole band instead, as an earlier version
+did, dragged photos from the far side forward, and mid-zoom they curled
+around the limb into view. For the same reason the morph waits until the
+globe fills the window corner to corner: while the limb is on screen there
+is nowhere out of sight to hide the transition. It completes where the
+largest photo fills the window.
+
+On a globe that wraps a full 360°, each vertex takes the short way around
+to the tangent point. Otherwise, zoomed in beside the seam where the
+mosaic's two ends meet, the vertices just across it would reach for the
+far end of the plane, a whole mosaic-width away.
+
 Both the tangent point and the blend factor depend only on the camera —
 never on which picture happens to be centred. An earlier version anchored
 on the centred photo and measured the ramp against *its* size, which looked
@@ -260,8 +275,9 @@ unchanged. Smooth everywhere beats exact somewhere — and a double click
 still centres the photo before flattening, so it comes out square anyway.
 
 Picking blends the same way — ray-sphere and ray-plane hits interpolated by
-the same factor — so the hover outline keeps tracking the right photo
-mid-morph.
+the same factor, the short way across the seam — so the hover outline keeps
+tracking the right photo mid-morph. Everything on screen lies inside the
+fully weighted patch, so that one factor is exact wherever you can point.
 
 ### Hover highlight
 

@@ -48,11 +48,16 @@ from vt_viewer import (VERT, FRAG_MAIN, FRAG_FEEDBACK, FrustumLines,
 # into a picture the surface eases from sphere to the plane tangent at that
 # picture, which also undoes the equirectangular squeeze away from the
 # equator, so the photo ends up flat and in its true aspect ratio.
+# Only a patch around the view centre flattens (full within uFlatNear
+# radians, none beyond uFlatFar), sized to overhang the screen: blending
+# the whole band would drag the far side forward, curling it around the
+# limb into view.
 SPHERE_VERT = """#version 330 core
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec2 aUV;
 uniform mat4 uMVP;
 uniform float uRadius, uLonHalf, uLatMax, uZSign, uFlat;
+uniform float uFlatNear, uFlatFar;
 uniform vec2 uFocus;      // lon, lat of the flattening anchor
 uniform vec2 uFlatDim;    // full mosaic size once flat
 out vec2 vUV;
@@ -72,10 +77,14 @@ void main() {
                           -uZSign * sin(tc) * cos(lc));
         float uc = 0.5 + lc / (2.0 * uLonHalf);
         float vc = 0.5 - tc / (2.0 * uLatMax);
+        float du = aUV.x - uc;
+        if (uLonHalf > 3.1415) du -= floor(du + 0.5);   // across the seam
         vec3 flat_p = uRadius * n
-                    + east  * ((aUV.x - uc) * uFlatDim.x)
+                    + east  * (du * uFlatDim.x)
                     + north * ((vc - aUV.y) * uFlatDim.y);
-        p = mix(p, flat_p, uFlat);
+        float ang = acos(clamp(dot(p / uRadius, n), -1.0, 1.0));
+        p = mix(p, flat_p,
+                uFlat * (1.0 - smoothstep(uFlatNear, uFlatFar, ang)));
     }
     gl_Position = uMVP * vec4(p, 1.0);
 }
@@ -200,6 +209,7 @@ class SphereViewer:
         self._idle_dir = 1.0
         self._user_moved = False      # auto-orbit stops on first interaction
         self.flat = 0.0               # 0 = sphere, 1 = flat rectangle
+        self.flat_near = self.flat_far = 0.0   # flattened patch, radians
         # Reference size for the flattening ramp, fixed once so the morph
         # never depends on which picture is centred. Using the largest
         # rect means every photo is fully flat by the time it fills the
@@ -312,12 +322,17 @@ class SphereViewer:
         if self.flat <= 0.0:
             return uv_s
         uv_p = self._uv_plane(p0, d)
+        full_wrap = self.lon_half >= math.pi - 1e-6
         if uv_s is None or uv_p is None:
             uv = uv_p if uv_s is None else uv_s
         else:
             f = self.flat
-            uv = (uv_s[0] + (uv_p[0] - uv_s[0]) * f,
-                  uv_s[1] + (uv_p[1] - uv_s[1]) * f)
+            du = uv_p[0] - uv_s[0]
+            if full_wrap:                   # the short way across the seam
+                du -= math.floor(du + 0.5)
+            uv = (uv_s[0] + du * f, uv_s[1] + (uv_p[1] - uv_s[1]) * f)
+        if uv is not None and full_wrap:
+            uv = (uv[0] - math.floor(uv[0]), uv[1])
         if uv is None or not (0.0 <= uv[0] <= 1.0 and 0.0 <= uv[1] <= 1.0):
             return None
         return uv
@@ -455,6 +470,13 @@ class SphereViewer:
         tan_h = tan_v * (w / max(h, 1))
         return max(ph / 2 / tan_v, pw / 2 / tan_h)
 
+    def diag_half_fov(self):
+        """Half-FOV across the window's diagonal: the farthest the view
+        reaches."""
+        w, h = glfw.get_framebuffer_size(self.win)
+        tan_v = math.tan(math.radians(OUT_FOV) / 2)
+        return math.atan(tan_v * math.hypot(1.0, w / max(h, 1)))
+
     def update_flat(self):
         """Ease the surface flat purely as a function of how close the
         camera is to the surface. Deliberately not keyed to whichever
@@ -463,15 +485,29 @@ class SphereViewer:
         of the view. Smooth everywhere beats exact somewhere — and when
         the view *is* centred on a photo (after a double click) the
         tangent point lands on it anyway, so that photo still comes out
-        square."""
+        square.
+
+        The ramp starts only once the globe fills the window corner to
+        corner, so no limb is in view, and completes where the largest
+        photo fills the window. In between, only the patch the window can
+        see flattens, and its fade to the untouched sphere lies beyond the
+        window's edge."""
         if self.inside:
             self.flat = 0.0
             return
-        lo = self.fit_height(self.ref_rect)   # fully flat by here
-        ratio = max(self.height / max(lo, 1e-6), 1e-6)
-        RAMP = 8.0                            # start flattening 8x further
-        t = min(max(1.0 - math.log2(ratio) / math.log2(RAMP), 0.0), 1.0)
+        phi, d = self.diag_half_fov(), RADIUS + self.height
+        lo = self.fit_height(self.ref_rect)                # fully flat here
+        hi = max(RADIUS / math.sin(phi) - RADIUS, 1.25 * lo)  # limb leaves
+        t = math.log(hi / self.height) / math.log(hi / max(lo, 1e-6))
+        t = min(max(t, 0.0), 1.0)
         self.flat = t * t * (3 - 2 * t)
+
+        # arc from the view centre to where the corner ray meets the
+        # sphere (or to the horizon, if it misses): what the window sees
+        s = d * math.sin(phi) / RADIUS
+        seen = math.asin(s) - phi if s < 1.0 else math.acos(RADIUS / d)
+        self.flat_near = seen + 0.05
+        self.flat_far = self.flat_near + max(0.25, 0.5 * self.flat_near)
 
     def focus_lonlat(self):
         """Tangent point = where the camera looks. Continuous by
@@ -570,6 +606,8 @@ class SphereViewer:
         glUniform1f(glGetUniformLocation(prog, "uZSign"),
                     -1.0 if self.inside else 1.0)
         glUniform1f(glGetUniformLocation(prog, "uFlat"), self.flat)
+        glUniform1f(glGetUniformLocation(prog, "uFlatNear"), self.flat_near)
+        glUniform1f(glGetUniformLocation(prog, "uFlatFar"), self.flat_far)
         glUniform2f(glGetUniformLocation(prog, "uFocus"), lon_c, lat_c)
         glUniform2f(glGetUniformLocation(prog, "uFlatDim"),
                     self.flat_w, self.flat_h)

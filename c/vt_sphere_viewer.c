@@ -32,12 +32,17 @@
 /* The band is generated in the vertex shader so it can morph: as you zoom
    into a picture the surface eases from sphere to the plane tangent at
    that picture, which also undoes the equirectangular squeeze away from
-   the equator, so the photo ends up flat and in its true aspect ratio. */
+   the equator, so the photo ends up flat and in its true aspect ratio.
+   Only a patch around the view centre flattens (full within uFlatNear
+   radians, none beyond uFlatFar), sized to overhang the screen: blending
+   the whole band would drag the far side forward, curling it around the
+   limb into view. */
 static const char *SPHERE_VS_SRC =
     "attribute vec3 aPos;\n"
     "attribute vec2 aUV;\n"
     "uniform mat4 uMVP;\n"
     "uniform float uRadius, uLonHalf, uLatMax, uZSign, uFlat;\n"
+    "uniform float uFlatNear, uFlatFar;\n"
     "uniform vec2 uFocus;\n"          /* lon, lat of the anchor */
     "uniform vec2 uFlatDim;\n"        /* full mosaic size once flat */
     "varying vec2 vUV;\n"
@@ -54,9 +59,12 @@ static const char *SPHERE_VS_SRC =
     "    vec3 north = vec3(-sin(tc)*sin(lc), cos(tc), -uZSign*sin(tc)*cos(lc));\n"
     "    float uc = 0.5 + lc/(2.0*uLonHalf);\n"
     "    float vc = 0.5 - tc/(2.0*uLatMax);\n"
-    "    vec3 fp = uRadius*n + east*((aUV.x-uc)*uFlatDim.x)\n"
+    "    float du = aUV.x - uc;\n"
+    "    if (uLonHalf > 3.1415) du -= floor(du + 0.5);\n"   /* across the seam */
+    "    vec3 fp = uRadius*n + east*(du*uFlatDim.x)\n"
     "                        + north*((vc-aUV.y)*uFlatDim.y);\n"
-    "    p = mix(p, fp, uFlat);\n"
+    "    float ang = acos(clamp(dot(p / uRadius, n), -1.0, 1.0));\n"
+    "    p = mix(p, fp, uFlat * (1.0 - smoothstep(uFlatNear, uFlatFar, ang)));\n"
     "  }\n"
     "  gl_Position = uMVP * vec4(p, 1.0);\n"
     "}\n";
@@ -108,6 +116,7 @@ typedef struct {
     bool click_test, hover_test;
     bool user_moved;            /* auto-orbit stops on first interaction */
     float flat;                 /* 0 = sphere, 1 = flat rectangle */
+    float flat_near, flat_far;  /* flattened patch radius, radians */
     float ref_rect[4];          /* fixed size driving the flattening ramp */
     float flat_w, flat_h;
     double last_click_t;
@@ -250,24 +259,47 @@ static void focus_lonlat(App *a, float *lon, float *lat)
     *lat = a->el;
 }
 
+/* Half-FOV across the window's diagonal: the farthest the view reaches. */
+static float diag_half_fov(App *a)
+{
+    int ww, wh;
+    SDL_GetWindowSize(a->w.win, &ww, &wh);
+    float tan_v = tanf(OUT_FOV * (float)M_PI / 360.0f);
+    float asp = (float)ww / (wh > 0 ? wh : 1);
+    return atanf(tan_v * sqrtf(1.0f + asp * asp));
+}
+
 /* Ease the surface flat purely as a function of how close the camera is
    to the surface. Deliberately not keyed to whichever picture is centred:
    anchoring on a specific photo made both the anchor and the ramp jump
    every time one scrolled past the middle of the view. Smooth everywhere
-   beats exact somewhere — and when the view *is* centred on a photo
-   (after a double click) the tangent point lands on it anyway. */
+   beats exact somewhere -- and when the view *is* centred on a photo
+   (after a double click) the tangent point lands on it anyway.
+
+   The ramp starts only once the globe fills the window corner to corner,
+   so no limb is in view, and completes where the largest photo fills the
+   window. In between, only the patch the window can see flattens, and its
+   fade to the untouched sphere lies beyond the window's edge. */
 static void update_flat(App *a)
 {
     if (a->inside) {
         a->flat = 0.0f;
         return;
     }
-    float lo = fit_height(a, a->ref_rect);     /* fully flat by here */
-    float ratio = a->height / fmaxf(lo, 1e-6f);
-    const float RAMP = 8.0f;                   /* start 8x further out */
-    float t = clampf(1.0f - log2f(fmaxf(ratio, 1e-6f)) / log2f(RAMP),
+    float phi = diag_half_fov(a), d = RADIUS + a->height;
+    float lo = fit_height(a, a->ref_rect);           /* fully flat by here */
+    float hi = fmaxf(RADIUS / sinf(phi) - RADIUS,    /* limb leaves view */
+                     1.25f * lo);
+    float t = clampf(logf(hi / a->height) / logf(hi / fmaxf(lo, 1e-6f)),
                      0.0f, 1.0f);
     a->flat = t * t * (3.0f - 2.0f * t);
+
+    /* arc from the view centre to where the corner ray meets the sphere
+       (or to the horizon, if it misses) -- what the window can see */
+    float s = d * sinf(phi) / RADIUS;
+    float seen = s < 1.0f ? asinf(s) - phi : acosf(RADIUS / d);
+    a->flat_near = seen + 0.05f;
+    a->flat_far = a->flat_near + fmaxf(0.25f, 0.5f * a->flat_near);
 }
 
 /* hit the sphere itself */
@@ -330,7 +362,8 @@ static bool uv_plane(App *a, const float p0[3], const float d[3],
 
 /* The surface morphs between sphere and tangent plane, so the pick
    blends the two by the same factor: exact at either end, and the two
-   agree near the focus in between. */
+   agree near the focus in between. Everything on screen lies inside the
+   fully-weighted patch, so the global factor is the right one here. */
 static bool cursor_uv(App *a, float cx, float cy, float *cu, float *cv)
 {
     int ww, wh;
@@ -368,8 +401,14 @@ static bool cursor_uv(App *a, float cx, float cy, float *cu, float *cv)
         return false;
     if (!hs) { su = pu; sv = pv; }
     if (!hp) { pu = su; pv = sv; }
-    *cu = su + (pu - su) * a->flat;
+    float du = pu - su;
+    bool full_wrap = a->lon_half >= (float)M_PI - 1e-6f;
+    if (full_wrap)                      /* the short way across the seam */
+        du -= floorf(du + 0.5f);
+    *cu = su + du * a->flat;
     *cv = sv + (pv - sv) * a->flat;
+    if (full_wrap)
+        *cu -= floorf(*cu);
     return *cu >= 0.0f && *cu <= 1.0f && *cv >= 0.0f && *cv <= 1.0f;
 }
 
@@ -519,6 +558,8 @@ static void draw_band(void *arg)
     glUniform1f(glGetUniformLocation(c->prog, "uZSign"),
                 a->inside ? -1.0f : 1.0f);
     glUniform1f(glGetUniformLocation(c->prog, "uFlat"), a->flat);
+    glUniform1f(glGetUniformLocation(c->prog, "uFlatNear"), a->flat_near);
+    glUniform1f(glGetUniformLocation(c->prog, "uFlatFar"), a->flat_far);
     glUniform2f(glGetUniformLocation(c->prog, "uFocus"), lon_c, lat_c);
     glUniform2f(glGetUniformLocation(c->prog, "uFlatDim"),
                 a->flat_w, a->flat_h);
