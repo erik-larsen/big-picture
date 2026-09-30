@@ -1,4 +1,4 @@
-# big-picture — virtual texturing viewers for giant images and image collections
+# big-picture
 
 Explore multi-gigapixel images and image collections in real time while the GPU only ever holds a
 single 4096² texture. A MegaTexture / LibVT-style virtual texturing renderer,
