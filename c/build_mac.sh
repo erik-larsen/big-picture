@@ -7,7 +7,7 @@ OGL_FOR_MAC="${OGL_FOR_MAC:-$HOME/Github/opengl-for-mac}"
 export DYLD_FALLBACK_LIBRARY_PATH="$OGL_FOR_MAC/lib"
 
 CFLAGS="-O2 -Wall $(sdl2-config --cflags) -I$OGL_FOR_MAC/include -DVT_ANGLE_LIB_DIR=\"$OGL_FOR_MAC/lib\""
-LIBS="$(sdl2-config --libs) -L$OGL_FOR_MAC/lib -lGLESv2 -lEGL -lm"
+LIBS="$(sdl2-config --libs) -L$OGL_FOR_MAC/lib -lGLESv2 -lEGL -lm -Wl,-headerpad_max_install_names"
 
 clang $CFLAGS -c vt_core.c -o vt_core.o
 clang $CFLAGS vt_viewer.c vt_core.o $LIBS -o vt_viewer

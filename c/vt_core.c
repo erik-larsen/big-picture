@@ -5,6 +5,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
@@ -16,6 +19,7 @@
 /* ---------------------------------------------------------------- misc */
 
 const char *vt_argv0 = "./vt_viewer";   /* set from main() for error hints */
+const char *vt_tile_url = NULL;          /* web: set from main() */
 
 double now_seconds(void)
 {
@@ -385,14 +389,112 @@ void vt_highlight_uniforms(GLuint prog, const float rect_uv[4], int style,
     glUniform1f(glGetUniformLocation(prog, "uHiScale"), dpi_scale);
 }
 
-/* -------------------------------------------------------- loader thread */
+/* --------------------------------------------------------------- loader */
 
 static void tile_path(VtSystem *vt, VtPage p, char *out, int cap)
 {
-    snprintf(out, cap, "%s/L%d/%d_%d.%s",
-             vt->dir, p.level, p.ty, p.tx, vt->format);
+    snprintf(out, cap, "%s/L%d/%d_%d.%s", vt_tile_url ? vt_tile_url : vt->dir,
+             p.level, p.ty, p.tx, vt->format);
 }
 
+static void push_ready(VtSystem *vt, VtPage p, unsigned char *pix, int bitmap)
+{
+    SDL_LockMutex(vt->ready_mtx);
+    if (vt->ready_count == vt->ready_cap) {
+        vt->ready_cap *= 2;
+        vt->ready_q = realloc(vt->ready_q,
+                              vt->ready_cap * sizeof *vt->ready_q);
+    }
+    vt->ready_q[vt->ready_count].page = p;
+    vt->ready_q[vt->ready_count].pixels = pix;
+    vt->ready_q[vt->ready_count].bitmap = bitmap;
+    vt->ready_count++;
+    SDL_UnlockMutex(vt->ready_mtx);
+}
+
+#ifdef __EMSCRIPTEN__
+/* The browser fetches and decodes -- createImageBitmap runs off the main
+   thread -- and the bitmap waits on the JS side under a small integer
+   handle until upload_tile hands it to texSubImage2D, so tile pixels never
+   pass through wasm memory at all. */
+EM_JS(void, js_fetch_tile, (const char *url, int key, int size), {
+    const u = UTF8ToString(url);
+    const bm = Module.vtBitmaps
+            || (Module.vtBitmaps = { next: 1, map: new Map() });
+    fetch(u)
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status);
+                     return r.blob(); })
+        .then(b => createImageBitmap(b, { premultiplyAlpha: 'none',
+                                          colorSpaceConversion: 'none' }))
+        .then(img => {
+            if (img.width != size || img.height != size) {
+                img.close();
+                throw new Error('bad size');
+            }
+            const h = bm.next++;
+            bm.map.set(h, img);
+            _vt_web_tile_done(key, h);
+        })
+        .catch(e => { console.warn('tile load failed: ' + u, e);
+                      _vt_web_tile_done(key, 0); });
+});
+
+EM_JS(void, js_upload_bitmap, (int h, GLuint tex, int x, int y), {
+    const img = Module.vtBitmaps.map.get(h);
+    Module.vtBitmaps.map.delete(h);
+    GLctx.bindTexture(GLctx.TEXTURE_2D, GL.textures[tex]);
+    GLctx.texSubImage2D(GLctx.TEXTURE_2D, 0, x, y, GLctx.RGB,
+                        GLctx.UNSIGNED_BYTE, img);
+    img.close();
+});
+
+EM_JS(void, js_drop_bitmap, (int h), {
+    Module.vtBitmaps.map.get(h).close();
+    Module.vtBitmaps.map.delete(h);
+});
+
+static VtSystem *web_vt;     /* the callback's way back in */
+
+EMSCRIPTEN_KEEPALIVE void vt_web_tile_done(int key, int bitmap)
+{
+    VtPage p = {key >> 24, key & 4095, (key >> 12) & 4095};
+    web_vt->inflight--;
+    push_ready(web_vt, p, NULL, bitmap);
+}
+
+/* Keep up to VT_MAX_INFLIGHT fetches going, coarsest first. Network
+   latency is far longer than a disk read, so a quick fling can queue
+   hundreds of pages that are gone from view before their turn comes;
+   those are dropped (and simply re-requested if they come back). */
+static void web_issue_fetches(VtSystem *vt)
+{
+    while (vt->inflight < VT_MAX_INFLIGHT && vt->req_count > 0) {
+        int best = -1;
+        for (int i = 0; i < vt->req_count; i++) {
+            VtPage p = vt->req_q[i];
+            int idx = p.ty * vt->nx[p.level] + p.tx;
+            if (p.level != vt->levels - 1
+                    && vt->frame - vt->wanted[p.level][idx] > VT_STALE_FRAMES) {
+                vt->pending[p.level][idx] = 0;
+                vt->n_pending--;
+                vt->req_q[i--] = vt->req_q[--vt->req_count];
+                continue;
+            }
+            if (best < 0 || p.level > vt->req_q[best].level)
+                best = i;
+        }
+        if (best < 0)
+            break;
+        VtPage p = vt->req_q[best];
+        vt->req_q[best] = vt->req_q[--vt->req_count];
+        char url[1200];
+        tile_path(vt, p, url, sizeof url);
+        js_fetch_tile(url, (p.level << 24) | (p.ty << 12) | p.tx,
+                      vt->slot_px);
+        vt->inflight++;
+    }
+}
+#else
 static int loader_main(void *arg)
 {
     VtSystem *vt = arg;
@@ -422,19 +524,10 @@ static int loader_main(void *arg)
         }
         if (!pix)
             fprintf(stderr, "tile load failed: %s\n", path);
-
-        SDL_LockMutex(vt->ready_mtx);
-        if (vt->ready_count == vt->ready_cap) {
-            vt->ready_cap *= 2;
-            vt->ready_q = realloc(vt->ready_q,
-                                  vt->ready_cap * sizeof *vt->ready_q);
-        }
-        vt->ready_q[vt->ready_count].page = p;
-        vt->ready_q[vt->ready_count].pixels = pix;
-        vt->ready_count++;
-        SDL_UnlockMutex(vt->ready_mtx);
+        push_ready(vt, p, pix, 0);
     }
 }
+#endif
 
 /* ------------------------------------------------------------ residency */
 
@@ -474,10 +567,16 @@ static int evict_slot(VtSystem *vt)
     return best;
 }
 
-static bool upload_tile(VtSystem *vt, VtPage p, const unsigned char *pix)
+/* On the web, a true return means the bitmap has been consumed. */
+static bool upload_tile(VtSystem *vt, VtPage p, const unsigned char *pix,
+                        int bitmap)
 {
-    if (vt->own[p.level][p.ty * vt->nx[p.level] + p.tx] >= 0)
+    if (vt->own[p.level][p.ty * vt->nx[p.level] + p.tx] >= 0) {
+#ifdef __EMSCRIPTEN__
+        js_drop_bitmap(bitmap);
+#endif
         return true;                        /* already resident */
+    }
     int slot = -1;
     for (int s = 0; s < vt->n_slots; s++)
         if (vt->slot_page[s].level < 0) { slot = s; break; }
@@ -487,9 +586,15 @@ static bool upload_tile(VtSystem *vt, VtPage p, const unsigned char *pix)
         return false;                       /* everything in use right now */
     int sx = (slot % vt->slots_per_row) * vt->slot_px;
     int sy = (slot / vt->slots_per_row) * vt->slot_px;
+#ifdef __EMSCRIPTEN__
+    (void)pix;
+    js_upload_bitmap(bitmap, vt->atlas_tex, sx, sy);
+#else
+    (void)bitmap;
     glBindTexture(GL_TEXTURE_2D, vt->atlas_tex);
     glTexSubImage2D(GL_TEXTURE_2D, 0, sx, sy, vt->slot_px, vt->slot_px,
                     GL_RGB, GL_UNSIGNED_BYTE, pix);
+#endif
     vt->own[p.level][p.ty * vt->nx[p.level] + p.tx] = slot;
     vt->slot_page[slot] = p;
     vt->slot_lastuse[slot] = vt->frame;
@@ -513,6 +618,8 @@ static void rebuild_page_table(VtSystem *vt)
                     e[0] = slot % vt->slots_per_row;
                     e[1] = slot / vt->slots_per_row;
                     e[2] = l;
+                } else if (l == vt->levels - 1) {  /* web: root not in yet */
+                    e[0] = e[1] = e[2] = 0;
                 } else {                    /* inherit finest ancestor */
                     int pb = vt->table_off_y[l + 1];
                     unsigned char *pe =
@@ -532,6 +639,9 @@ static void rebuild_page_table(VtSystem *vt)
 
 void vt_pump_uploads(VtSystem *vt)
 {
+#ifdef __EMSCRIPTEN__
+    web_issue_fetches(vt);
+#endif
     for (int i = 0; i < VT_MAX_UPLOADS_PER_FRAME; i++) {
         SDL_LockMutex(vt->ready_mtx);
         if (vt->ready_count == 0) {
@@ -545,12 +655,12 @@ void vt_pump_uploads(VtSystem *vt)
         SDL_UnlockMutex(vt->ready_mtx);
 
         int idx = r.page.ty * vt->nx[r.page.level] + r.page.tx;
-        if (!r.pixels) {                    /* decode failed: drop */
+        if (!r.pixels && !r.bitmap) {       /* load failed: drop */
             vt->pending[r.page.level][idx] = 0;
             vt->n_pending--;
             continue;
         }
-        if (upload_tile(vt, r.page, r.pixels)) {
+        if (upload_tile(vt, r.page, r.pixels, r.bitmap)) {
             vt->pending[r.page.level][idx] = 0;
             vt->n_pending--;
             stbi_image_free(r.pixels);
@@ -610,6 +720,7 @@ void vt_request_from_feedback(VtSystem *vt, const unsigned char *rgba, int n)
         while (l < vt->levels) {            /* include ancestors */
             int idx = ty * vt->nx[l] + tx;
             int slot = vt->own[l][idx];
+            vt->wanted[l][idx] = vt->frame;
             if (slot >= 0) {
                 vt->slot_lastuse[slot] = vt->frame;
             } else if (!vt->pending[l][idx]) {
@@ -684,6 +795,7 @@ bool vt_init(VtSystem *vt, const char *pyramid_dir)
         off += vt->ny[l];
         vt->own[l] = malloc(vt->nx[l] * vt->ny[l] * sizeof(int));
         vt->pending[l] = calloc(vt->nx[l], vt->ny[l]);
+        vt->wanted[l] = calloc(vt->nx[l] * vt->ny[l], sizeof(unsigned));
         for (int i = 0; i < vt->nx[l] * vt->ny[l]; i++)
             vt->own[l][i] = -1;
         w = (w + 1) / 2;
@@ -728,13 +840,24 @@ bool vt_init(VtSystem *vt, const char *pyramid_dir)
     vt->req_q = malloc(vt->req_cap * sizeof(VtPage));
     vt->ready_cap = 256;
     vt->ready_q = malloc(vt->ready_cap * sizeof *vt->ready_q);
+    VtPage root = {vt->levels - 1, 0, 0};
+#ifdef __EMSCRIPTEN__
+    /* no thread (SDL's locks are no-ops here), and nothing may block, so
+       the root is simply the first request; vt_root_resident() says when
+       there is something to draw */
+    web_vt = vt;
+    vt->pending[root.level][0] = 1;
+    vt->n_pending++;
+    enqueue_request(vt, root);
+    web_issue_fetches(vt);                  /* start now, not next frame */
+    rebuild_page_table(vt);
+#else
     vt->req_mtx = SDL_CreateMutex();
     vt->req_cond = SDL_CreateCond();
     vt->ready_mtx = SDL_CreateMutex();
     vt->loader = SDL_CreateThread(loader_main, "vt_loader", vt);
 
     /* the root tile must always be resident: load it synchronously */
-    VtPage root = {vt->levels - 1, 0, 0};
     char path[1200];
     tile_path(vt, root, path, sizeof path);
     int tw, th, tn;
@@ -743,9 +866,10 @@ bool vt_init(VtSystem *vt, const char *pyramid_dir)
         fprintf(stderr, "cannot load root tile %s\n", path);
         return false;
     }
-    upload_tile(vt, root, pix);
+    upload_tile(vt, root, pix, 0);
     stbi_image_free(pix);
     rebuild_page_table(vt);
+#endif
     vt->dirty = false;
 
     printf("vt: %dx%d, %d levels, %d slots, format %s\n",
@@ -771,6 +895,11 @@ void vt_evict_unused(VtSystem *vt)
     }
 }
 
+bool vt_root_resident(VtSystem *vt)
+{
+    return vt->own[vt->levels - 1][0] >= 0;
+}
+
 bool vt_idle(VtSystem *vt)
 {
     SDL_LockMutex(vt->ready_mtx);
@@ -781,6 +910,8 @@ bool vt_idle(VtSystem *vt)
 
 void vt_destroy(VtSystem *vt)
 {
+    if (!vt->loader)
+        return;                             /* web: no thread to stop */
     SDL_LockMutex(vt->req_mtx);
     vt->quit = true;
     SDL_CondSignal(vt->req_cond);

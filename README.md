@@ -2,7 +2,10 @@
 
 Explore multi-gigapixel images and image collections in real time while the GPU only ever holds a
 single 4096² texture. A MegaTexture / LibVT-style virtual texturing renderer,
-in Python (OpenGL 3.3) and C (SDL2 + OpenGL ES 2.0).
+in Python (OpenGL 3.3) and C (SDL2 + OpenGL ES 2.0) — and the C version
+compiled to WebAssembly, so it runs in a browser too.
+
+**[Try the globe in your browser →](https://erik-larsen.github.io/big-picture/)**
 
 ![Photo globe](pics/screens/photo-globe.jpg)
 *445 mountain photographs mosaicked into a single 1.7 gigapixel image and
@@ -28,6 +31,14 @@ The C viewers are optional, and need SDL2 plus the ANGLE GLES2 libraries from
 brew install sdl2
 git clone https://github.com/erik-larsen/opengl-for-mac.git ~/Github/opengl-for-mac
 cd c && OGL_FOR_MAC=~/Github/opengl-for-mac ./build_mac.sh
+```
+
+The web build needs [emsdk](https://emscripten.org/docs/getting_started/downloads.html);
+it pulls in SDL2 by itself:
+
+```sh
+source ~/Github/emsdk/emsdk_env.sh
+cd c && ./build_web.sh     # -> web/vt_sphere_viewer.{js,wasm}
 ```
 
 ## Run
@@ -109,6 +120,30 @@ out. The C viewers take the same arguments:
 cd c && ./vt_viewer ../pics/test_image_16k_pyramid
 ```
 
+**In a browser** — the same pipeline, with JPEG tiles and one packaging
+step. `export_web.py` gathers the tiles, `meta.json`, the layout, and a
+credit for every photo into one folder a static web server can host:
+
+```sh
+./build_pyramid.py pics/photos_mountains_mosaic.npy --format jpg --quality 80
+./export_web.py pics/photos_mountains_mosaic_pyramid   # -> pics/photos_mountains_mosaic_web/
+ln -s ../pics/photos_mountains_mosaic_web web/tiles
+python3 -m http.server -d web                          # http://localhost:8000
+```
+
+The page looks for `tiles/` beside itself; `?tiles=URL` points it anywhere
+else. The live demo publishes `web/` from this repo with GitHub Actions
+(`.github/workflows/pages.yml`), and the tiles from their own repo,
+[big-picture-tiles](https://github.com/erik-larsen/big-picture-tiles), so
+that they don't weigh on every clone of the code. To republish them, export
+straight into a checkout of that repo and replace its single commit:
+
+```sh
+./export_web.py pics/photos_mountains_mosaic_pyramid --out ../big-picture-tiles
+cd ../big-picture-tiles && git checkout --orphan new && git add -A \
+    && git commit -qm "Tiles" && git branch -M new main && git push -f origin main
+```
+
 ![Sphere viewer](pics/screens/sphere-viewer.png)
 *The same virtual-texturing core on a sphere band — only the geometry differs.*
 
@@ -165,6 +200,7 @@ settle, and saves the frame.
 | `fetch_photos.py` | Downloads N royalty-free photographs via the official Unsplash, Pexels, or Pixabay API. Each is asked for photos only, so illustrations and AI artwork are excluded server-side. Resumable, and writes a `CREDITS.md` crediting every photographer. |
 | `layout_mosaic.py` | Folder tree → one giant mosaic, justified rows (each row spans the full width, aspect preserved). Auto-sizes the canvas so images land at ~native resolution. Writes a `layout.json` of every image's rectangle. `--aspect`, `--width`, `--gap`, `--workers`. |
 | `build_pyramid.py` | Any rectangular `.npy` → tile pyramid, L0 = full res up to a single root tile (7 levels / 5461 tiles for the test image). Partial edge tiles are edge-padded. `--format jpg` for smaller tiles, `--workers` for the encode pool. |
+| `export_web.py` | Pyramid → a folder for the web viewer: the tiles (hard-linked, not copied), `meta.json`, the layout with paths cut to basenames, and `credits.json` naming the photographer of every photo, from the `photos.json` that `fetch_photos.py` writes. |
 | `export_dzi.py` | Pyramid → Deep Zoom, viewable in OpenSeadragon in a browser. Re-crops to DZI's edge-tile convention, flips the level numbering, and writes `image.dzi` + a ready `viewer.html`. |
 
 Output names and locations derive from the input: a photo folder yields
@@ -257,3 +293,28 @@ page IDs with `mod`/`floor` arithmetic — which incidentally leaves the shaders
 WebGL1-compatible. Tiles decode via vendored `stb_image.h`. `build_mac.sh`
 rewrites ANGLE's cwd-relative dylib install names to absolute paths, so no
 `DYLD_FALLBACK_LIBRARY_PATH` is needed at runtime.
+
+### Web port
+
+`c/build_web.sh` compiles the same C with Emscripten; the shaders were
+already WebGL1-ready. Everything above the loader is untouched — atlas,
+page table, feedback pass, de-warp, hover — and the loader is the one
+part that changes, because a browser has neither a filesystem nor, on
+GitHub Pages, threads (they need cross-origin isolation headers that
+Pages can't send).
+
+So the loader thread becomes the browser's. C still decides what to load
+and in what order, coarsest first, but hands each URL to `fetch()`;
+`createImageBitmap` decodes it off the main thread, and the bitmap goes
+straight to `texSubImage2D` on the atlas. The pixels never pass through
+wasm memory. Network latency is far longer than a disk read, so a fast
+fling can queue hundreds of pages that have scrolled away before their
+turn comes. Requests that no feedback pass has asked for in 30 frames are
+dropped, and simply re-requested if they come back into view.
+
+Before `main()` runs, the page writes `meta.json` and the layout into
+Emscripten's in-memory filesystem, so `vt_init` reads them with the same
+`fopen` as natively. The main loop becomes `frame()`, which the browser
+calls once per display refresh. Touch arrives from SDL as mouse events,
+plus a pinch handler, and portrait screens start the camera far enough out
+to fit the whole globe.

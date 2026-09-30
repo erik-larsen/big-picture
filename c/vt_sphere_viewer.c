@@ -14,6 +14,10 @@
                             [--idle-delay S] [--idle-speed DEG/S]
                             [--frames N] [--screenshot OUT.png]
                             [--end-fov F] [--end-height H] [--click-test]
+                            [--tiles URL]   (web build only)
+
+    Built with Emscripten (build_web.sh) it runs in the browser: the page
+    drives frame() once per display refresh, and adds pinch to zoom.
 */
 #include "vt_core.h"
 
@@ -21,6 +25,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 
 /* The band is generated in the vertex shader so it can morph: as you zoom
    into a picture the surface eases from sphere to the plane tangent at
@@ -104,6 +111,17 @@ typedef struct {
     float ref_rect[4];          /* fixed size driving the flattening ramp */
     float flat_w, flat_h;
     double last_click_t;
+
+    /* touch: two fingers pinch-zoom (one finger arrives as the mouse) */
+    SDL_FingerID finger_id[2];
+    float finger_x[2], finger_y[2];
+    int n_fingers;
+
+    /* main loop state, kept here so the browser can drive frame() */
+    bool running, reported_ready;
+    int frame, fps_n;
+    double loop_t0, fps_t, prev_t;
+    char shown[256];            /* image name last reported to the page */
 } App;
 
 static float clampf(float v, float lo, float hi)
@@ -115,6 +133,28 @@ static float wrap_pi(float a)
     while (a < -(float)M_PI) a += 2 * (float)M_PI;
     return a;
 }
+
+/* ------------------------------------------------------------ web page */
+
+/* The page around the canvas shows loading progress and credits whoever
+   took the photo under the pointer; natively these are no-ops. */
+static void page_notify_photo(App *a, const char *name)
+{
+    if (!strcmp(a->shown, name))
+        return;
+    snprintf(a->shown, sizeof a->shown, "%s", name);
+#ifdef __EMSCRIPTEN__
+    EM_ASM({ if (Module.vtPhoto) Module.vtPhoto(UTF8ToString($0)); }, name);
+#endif
+}
+
+#ifdef __EMSCRIPTEN__
+static void page_notify_status(App *a, float fps, int resident)
+{
+    EM_ASM({ if (Module.vtStatus) Module.vtStatus($0, $1, $2, $3, $4); },
+           fps, resident, a->vt.n_slots, a->vt.n_pending, a->vt.loads_done);
+}
+#endif
 
 /* ------------------------------------------------------------- manifest */
 
@@ -132,8 +172,11 @@ static void update_hover(App *a, float cx, float cy)
     a->has_hover = false;
     if (!a->manifest.rects || !cursor_uv(a, cx, cy, &cu, &cv))
         return;
-    a->has_hover = vt_manifest_rect_at(&a->manifest, cu, cv, a->vt.virt_w,
-                                       a->vt.virt_h, a->hover_uv) >= 0;
+    int hit = vt_manifest_rect_at(&a->manifest, cu, cv, a->vt.virt_w,
+                                  a->vt.virt_h, a->hover_uv);
+    a->has_hover = hit >= 0;
+    if (hit >= 0)
+        page_notify_photo(a, a->manifest.rects[hit].name);
 }
 
 /* --------------------------------------------------------------- camera */
@@ -185,6 +228,18 @@ static float fit_height(App *a, const float rect[4])
     float tan_v = tanf(OUT_FOV * (float)M_PI / 360.0f);
     float tan_h = tan_v * (float)ww / (wh > 0 ? wh : 1);
     return fmaxf(ph / 2 / tan_v, pw / 2 / tan_h);
+}
+
+/* Opening camera height: the globe fills the window's height, or its
+   width when the window is portrait (a phone), so it is always whole. */
+static float home_height(App *a)
+{
+    int ww, wh;
+    SDL_GetWindowSize(a->w.win, &ww, &wh);
+    float tan_v = tanf(OUT_FOV * (float)M_PI / 360.0f);
+    float tan_h = tan_v * (float)ww / (wh > 0 ? wh : 1);
+    float half = atanf(fminf(tan_v, tan_h));
+    return fmaxf(12.0f, RADIUS / sinf(half) - RADIUS);
 }
 
 /* Tangent point = where the camera looks. Continuous by construction,
@@ -334,6 +389,7 @@ static void click_center_zoom(App *a, float cx, float cy, bool fit)
         cv = (rect[1] + rect[3]) * 0.5f;
         snprintf(a->last_click, sizeof a->last_click, "%s",
                  a->manifest.rects[hit].name);
+        page_notify_photo(a, a->last_click);
     }
     float zoom = a->inside ? a->fov : a->height;
     float end_zoom = zoom;              /* single click: centre only */
@@ -525,6 +581,62 @@ static float drag_rate(App *a)
     return 0.005f * clampf(a->height / RADIUS, 0.03f, 1.5f);
 }
 
+static float finger_spread(App *a)
+{
+    int ww, wh;
+    SDL_GetWindowSize(a->w.win, &ww, &wh);
+    float dx = (a->finger_x[0] - a->finger_x[1]) * ww;
+    float dy = (a->finger_y[0] - a->finger_y[1]) * wh;
+    return sqrtf(dx * dx + dy * dy);
+}
+
+static void zoom_by(App *a, float factor)
+{
+    a->last_input = now_seconds();
+    a->user_moved = true;
+    a->anim.active = false;
+    if (a->inside)
+        a->fov = clampf(a->fov * factor, 3.0f, 110.0f);
+    else
+        a->height = clampf(a->height * factor, 0.02f, 60.0f);
+}
+
+static void handle_finger(App *a, const SDL_Event *ev)
+{
+    const SDL_TouchFingerEvent *f = &ev->tfinger;
+    int k = -1;
+    for (int i = 0; i < a->n_fingers; i++)
+        if (a->finger_id[i] == f->fingerId)
+            k = i;
+    if (ev->type == SDL_FINGERDOWN) {
+        if (k < 0 && a->n_fingers < 2) {
+            k = a->n_fingers++;
+            a->finger_id[k] = f->fingerId;
+        }
+        if (k >= 0) {
+            a->finger_x[k] = f->x;
+            a->finger_y[k] = f->y;
+        }
+        if (a->n_fingers == 2) {     /* a pinch, not a drag or a tap */
+            a->dragging = a->has_press = false;
+            a->vel_az = a->vel_el = 0;
+        }
+    } else if (ev->type == SDL_FINGERMOTION && k >= 0) {
+        float before = a->n_fingers == 2 ? finger_spread(a) : 0;
+        a->finger_x[k] = f->x;
+        a->finger_y[k] = f->y;
+        if (a->n_fingers == 2 && before > 1) {
+            float after = finger_spread(a);
+            if (after > 1)
+                zoom_by(a, before / after);
+        }
+    } else if (ev->type == SDL_FINGERUP && k >= 0) {
+        a->finger_id[k] = a->finger_id[--a->n_fingers];
+        a->finger_x[k] = a->finger_x[a->n_fingers];
+        a->finger_y[k] = a->finger_y[a->n_fingers];
+    }
+}
+
 static void handle_events(App *a, bool *running)
 {
     SDL_Event ev;
@@ -535,9 +647,11 @@ static void handle_events(App *a, bool *running)
             break;
         case SDL_KEYDOWN:
             a->last_input = now_seconds();
-            if (ev.key.keysym.sym == SDLK_ESCAPE)
+            if (ev.key.keysym.sym == SDLK_ESCAPE) {
+#ifndef __EMSCRIPTEN__                /* a web page has nothing to quit */
                 *running = false;
-            else if (ev.key.keysym.sym == SDLK_l)
+#endif
+            } else if (ev.key.keysym.sym == SDLK_l)
                 a->debug ^= 1;
             else if (ev.key.keysym.sym == SDLK_f)
                 toggle_freeze(a);
@@ -550,12 +664,19 @@ static void handle_events(App *a, bool *running)
                 a->vel_az = a->vel_el = 0;
                 a->az = a->el = 0;
                 a->fov = 75.0f;
-                a->height = 12.0f;
+                a->height = home_height(a);
                 a->vel_az = a->vel_el = 0;
                 a->user_moved = false;   /* back to the opening spin */
             }
             break;
+        case SDL_FINGERDOWN:
+        case SDL_FINGERMOTION:
+        case SDL_FINGERUP:
+            handle_finger(a, &ev);
+            break;
         case SDL_MOUSEBUTTONDOWN:
+            if (a->n_fingers >= 2)
+                break;                  /* second finger of a pinch */
             a->last_input = now_seconds();
             a->user_moved = true;
             a->anim.active = false;
@@ -566,11 +687,13 @@ static void handle_events(App *a, bool *running)
             a->drag_y = a->press_y = ev.button.y;
             a->has_press = true;
             break;
-        case SDL_MOUSEBUTTONUP:
+        case SDL_MOUSEBUTTONUP: {
             a->last_input = now_seconds();
+            /* a fingertip wobbles more than a mouse between down and up */
+            float slop = ev.button.which == SDL_TOUCH_MOUSEID ? 12 : 4;
             if (ev.button.button == SDL_BUTTON_LEFT && a->has_press
-                    && fabsf(ev.button.x - a->press_x) < 4
-                    && fabsf(ev.button.y - a->press_y) < 4) {
+                    && fabsf(ev.button.x - a->press_x) < slop
+                    && fabsf(ev.button.y - a->press_y) < slop) {
                 a->vel_az = a->vel_el = 0;
                 {
                     double now = now_seconds();
@@ -585,6 +708,7 @@ static void handle_events(App *a, bool *running)
             a->dragging = false;
             a->has_press = false;
             break;
+        }
         case SDL_MOUSEMOTION:
             if (!a->dragging)
                 update_hover(a, ev.motion.x, ev.motion.y);
@@ -613,16 +737,7 @@ static void handle_events(App *a, bool *running)
             }
             break;
         case SDL_MOUSEWHEEL:
-            a->last_input = now_seconds();
-            a->user_moved = true;
-            a->anim.active = false;
-            if (a->inside)
-                a->fov = clampf(a->fov * powf(0.92f, ev.wheel.preciseY),
-                                3.0f, 110.0f);
-            else
-                a->height = clampf(a->height
-                                   * powf(0.92f, ev.wheel.preciseY),
-                                   0.02f, 60.0f);
+            zoom_by(a, powf(0.92f, ev.wheel.preciseY));
             break;
         case SDL_WINDOWEVENT:
             if (ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
@@ -634,188 +749,215 @@ static void handle_events(App *a, bool *running)
 
 /* ----------------------------------------------------------------- main */
 
+/* One iteration of the main loop: natively called from a while loop,
+   on the web by the browser once per display refresh. */
+static void frame(void *arg)
+{
+    App *a = arg;
+    handle_events(a, &a->running);
+    double now = now_seconds();
+    float dt = (float)(now - a->prev_t);
+    if (dt > 0.1f) dt = 0.1f;
+    a->prev_t = now;
+
+    if (a->frames >= 0) {                       /* scripted sweep */
+        if (a->frame < a->frames) {
+            float k = (float)a->frame / (a->frames > 1 ? a->frames - 1 : 1);
+            a->az = 0.7f * a->lon_half * sinf(2 * (float)M_PI * k);
+            a->el = 0.5f * LAT_MAX * sinf(4 * (float)M_PI * k);
+            if (a->inside)
+                a->fov = 75.0f * powf(a->end_fov / 75.0f, k);
+            else
+                a->height = 12.0f * powf(a->end_height / 12.0f, k);
+        } else {
+            int extra = a->frame - a->frames;
+            if (a->hover_test) {             /* hover the window centre */
+                int ww, wh;
+                SDL_GetWindowSize(a->w.win, &ww, &wh);
+                update_hover(a, ww / 2.0f, wh / 2.0f);
+            }
+            if (a->click_test
+                    && (extra == 20 || extra == 60 || extra == 100)) {
+                int ww, wh;
+                SDL_GetWindowSize(a->w.win, &ww, &wh);
+                click_center_zoom(a, ww * 0.32f, wh * 0.38f, false);
+                if (a->anim.active)
+                    printf("click -> %s  az %.1f  el %.1f  zoom %.2f\n",
+                           a->last_click[0] ? a->last_click : "(point)",
+                           a->anim.az1 * 180.0 / M_PI,
+                           a->anim.el1 * 180.0 / M_PI, a->anim.zoom1);
+            }
+            int min_extra = a->click_test ? 120 : 0;
+            if ((extra > min_extra && !a->anim.active
+                    && vt_idle(&a->vt)) || extra > 600)
+                a->running = false;
+        }
+    } else {
+        update_free_motion(a, dt);
+    }
+    update_anim(a);
+    update_flat(a);
+    if (a->frames < 0)
+        refresh_hover(a);
+    compute_mvp(a);
+
+    if (!a->freeze) {
+        DrawCtx fb_ctx = {a, a->vt.prog_fb};
+        vtw_run_feedback(&a->w, &a->vt, a->vt.prog_fb, a->mvp,
+                         draw_band, &fb_ctx);
+        vt_pump_uploads(&a->vt);
+    }
+    if (!a->reported_ready && vt_root_resident(&a->vt)) {
+        a->reported_ready = true;
+#ifdef __EMSCRIPTEN__
+        EM_ASM({ if (Module.vtReady) Module.vtReady(); });
+#endif
+    }
+
+    glViewport(0, 0, a->w.draw_w, a->w.draw_h);
+    glClearColor(0.05f, 0.06f, 0.08f, 1);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    DrawCtx main_ctx = {a, a->vt.prog_main};
+    vt_bind(&a->vt, a->vt.prog_main);
+    glUniform1i(glGetUniformLocation(a->vt.prog_main, "uDebug"), a->debug);
+    vt_highlight_uniforms(a->vt.prog_main, a->has_hover ? a->hover_uv : NULL,
+                          a->hi_style, (float)(now_seconds() - a->t0),
+                          a->w.dpi_scale);
+    draw_band(&main_ctx);
+    if (a->freeze)
+        vt_lines_draw(&a->lines, a->mvp);
+
+    if (!a->running && a->screenshot)
+        vtw_screenshot(&a->w, a->screenshot);
+    SDL_GL_SwapWindow(a->w.win);
+    a->frame++;
+    a->fps_n++;
+    if (now - a->fps_t > 0.5) {
+        int resident = 0;
+        for (int s = 0; s < a->vt.n_slots; s++)
+            if (a->vt.slot_page[s].level >= 0)
+                resident++;
+        float fps = (float)(a->fps_n / (now - a->fps_t));
+#ifdef __EMSCRIPTEN__             /* the page's status line, not the tab */
+        page_notify_status(a, fps, resident);
+#else
+        char title[400];
+        snprintf(title, sizeof title,
+                 "vt sphere viewer (C/GLES2) | %5.1f fps | resident "
+                 "%d/%d | pending %d%s%s%s",
+                 fps, resident, a->vt.n_slots,
+                 a->vt.n_pending, a->freeze ? " | FROZEN" : "",
+                 a->last_click[0] ? " | " : "", a->last_click);
+        SDL_SetWindowTitle(a->w.win, title);
+#endif
+        a->fps_t = now;
+        a->fps_n = 0;
+    }
+#ifdef __EMSCRIPTEN__
+    if (!a->running)
+        emscripten_cancel_main_loop();
+#endif
+}
+
 int main(int argc, char **argv)
 {
-    App a;
-    memset(&a, 0, sizeof a);
+    static App app;       /* static: on the web it outlives main() */
+    App *a = &app;
     vt_argv0 = argv[0];
-    a.pyramid = "../pics/test_image_16k_pyramid";
-    a.frames = -1;
-    a.end_fov = 28.0f;
-    a.end_height = 1.0f;
-    a.idle_delay = 5.0f;
-    a.idle_speed = 3.0f;
-    a.idle_dir = 1.0f;
-    a.hi_style = 2;
+    a->pyramid = "../pics/test_image_16k_pyramid";
+    a->frames = -1;
+    a->end_fov = 28.0f;
+    a->end_height = 1.0f;
+    a->idle_delay = 5.0f;
+    a->idle_speed = 3.0f;
+    a->idle_dir = 1.0f;
+    a->hi_style = 2;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--pyramid") && i + 1 < argc)
-            a.pyramid = argv[++i];
+            a->pyramid = argv[++i];
         else if (!strcmp(argv[i], "--manifest") && i + 1 < argc)
-            a.manifest_path = argv[++i];
+            a->manifest_path = argv[++i];
         else if (!strcmp(argv[i], "--inside"))
-            a.inside = true;
+            a->inside = true;
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
-            a.frames = atoi(argv[++i]);
+            a->frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc)
-            a.screenshot = argv[++i];
+            a->screenshot = argv[++i];
         else if (!strcmp(argv[i], "--end-fov") && i + 1 < argc)
-            a.end_fov = atof(argv[++i]);
+            a->end_fov = atof(argv[++i]);
         else if (!strcmp(argv[i], "--end-height") && i + 1 < argc)
-            a.end_height = atof(argv[++i]);
+            a->end_height = atof(argv[++i]);
         else if (!strcmp(argv[i], "--idle-delay") && i + 1 < argc)
-            a.idle_delay = atof(argv[++i]);
+            a->idle_delay = atof(argv[++i]);
         else if (!strcmp(argv[i], "--idle-speed") && i + 1 < argc)
-            a.idle_speed = atof(argv[++i]);
+            a->idle_speed = atof(argv[++i]);
         else if (!strcmp(argv[i], "--click-test"))
-            a.click_test = true;
+            a->click_test = true;
         else if (!strcmp(argv[i], "--hover-test"))
-            a.hover_test = true;
+            a->hover_test = true;
         else if (!strcmp(argv[i], "--hi-style") && i + 1 < argc)
-            a.hi_style = atoi(argv[++i]);
+            a->hi_style = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--tiles") && i + 1 < argc)
+            vt_tile_url = argv[++i];
         else if (argv[i][0] != '-')
-            a.pyramid = argv[i];
+            a->pyramid = argv[i];
     }
 
-    if (!vt_check_pyramid(a.pyramid))     /* before opening a window */
+    if (!vt_check_pyramid(a->pyramid))    /* before opening a window */
         return 1;
-    if (!vtw_create(&a.w, "vt sphere viewer (C/GLES2)"))
+    if (!vtw_create(&a->w, "vt sphere viewer (C/GLES2)"))
         return 1;
-    SDL_GL_SetSwapInterval(a.frames >= 0 ? 0 : 1);
-    if (!vt_init(&a.vt, a.pyramid))
+    SDL_GL_SetSwapInterval(a->frames >= 0 ? 0 : 1);
+    if (!vt_init(&a->vt, a->pyramid))
         return 1;
-    load_manifest(&a);
-    vt_lines_init(&a.lines);
-    a.t0 = now_seconds();
+    load_manifest(a);
+    vt_lines_init(&a->lines);
+    a->t0 = now_seconds();
 
-    float aspect = (float)a.vt.virt_w / a.vt.virt_h;
-    a.lon_half = fminf((float)M_PI, LAT_MAX * aspect);
+    float aspect = (float)a->vt.virt_w / a->vt.virt_h;
+    a->lon_half = fminf((float)M_PI, LAT_MAX * aspect);
     printf("band: lon +-%.1f deg, lat +-60 deg, %s view\n",
-           a.lon_half * 180.0 / M_PI, a.inside ? "inside" : "outside");
+           a->lon_half * 180.0 / M_PI, a->inside ? "inside" : "outside");
     /* pair the shared fragment shaders with our morphing vertex shader */
-    a.vt.prog_main = vt_compile_program(SPHERE_VS_SRC, vt_fs_main_src);
-    a.vt.prog_fb = vt_compile_program(SPHERE_VS_SRC, vt_fs_feedback_src);
-    a.flat_w = 2 * a.lon_half * RADIUS;
-    a.flat_h = 2 * LAT_MAX * RADIUS;
+    a->vt.prog_main = vt_compile_program(SPHERE_VS_SRC, vt_fs_main_src);
+    a->vt.prog_fb = vt_compile_program(SPHERE_VS_SRC, vt_fs_feedback_src);
+    a->flat_w = 2 * a->lon_half * RADIUS;
+    a->flat_h = 2 * LAT_MAX * RADIUS;
     /* largest rect: every photo is fully flat by the time it fills the
        window, and the ramp never depends on which one is centred */
-    a.ref_rect[0] = a.ref_rect[1] = 0.0f;
-    a.ref_rect[2] = a.ref_rect[3] = 1.0f / 12;   /* no manifest fallback */
-    if (a.manifest.rects) {
+    a->ref_rect[0] = a->ref_rect[1] = 0.0f;
+    a->ref_rect[2] = a->ref_rect[3] = 1.0f / 12;  /* no manifest fallback */
+    if (a->manifest.rects) {
         int mw = 0, mh = 0;
-        for (int i = 0; i < a.manifest.n; i++) {
-            if (a.manifest.rects[i].w > mw) mw = a.manifest.rects[i].w;
-            if (a.manifest.rects[i].h > mh) mh = a.manifest.rects[i].h;
+        for (int i = 0; i < a->manifest.n; i++) {
+            if (a->manifest.rects[i].w > mw) mw = a->manifest.rects[i].w;
+            if (a->manifest.rects[i].h > mh) mh = a->manifest.rects[i].h;
         }
-        a.ref_rect[2] = (float)mw / a.vt.virt_w;
-        a.ref_rect[3] = (float)mh / a.vt.virt_h;
+        a->ref_rect[2] = (float)mw / a->vt.virt_w;
+        a->ref_rect[3] = (float)mh / a->vt.virt_h;
     }
-    build_band_mesh(&a);
+    build_band_mesh(a);
 
-    a.fov = 75.0f;
-    a.height = 12.0f;
-    a.last_input = now_seconds();
+    a->fov = 75.0f;
+    a->height = home_height(a);
+    a->last_input = now_seconds();
 
     glEnable(GL_DEPTH_TEST);
 
-    bool running = true;
-    int frame = 0, fps_n = 0;
-    double t0 = now_seconds(), fps_t = t0, prev_t = t0;
-    while (running) {
-        handle_events(&a, &running);
-        double now = now_seconds();
-        float dt = (float)(now - prev_t);
-        if (dt > 0.1f) dt = 0.1f;
-        prev_t = now;
-
-        if (a.frames >= 0) {                    /* scripted sweep */
-            if (frame < a.frames) {
-                float k = (float)frame / (a.frames > 1 ? a.frames - 1 : 1);
-                a.az = 0.7f * a.lon_half * sinf(2 * (float)M_PI * k);
-                a.el = 0.5f * LAT_MAX * sinf(4 * (float)M_PI * k);
-                if (a.inside)
-                    a.fov = 75.0f * powf(a.end_fov / 75.0f, k);
-                else
-                    a.height = 12.0f * powf(a.end_height / 12.0f, k);
-            } else {
-                int extra = frame - a.frames;
-                if (a.hover_test) {          /* hover the window centre */
-                    int ww, wh;
-                    SDL_GetWindowSize(a.w.win, &ww, &wh);
-                    update_hover(&a, ww / 2.0f, wh / 2.0f);
-                }
-                if (a.click_test
-                        && (extra == 20 || extra == 60 || extra == 100)) {
-                    int ww, wh;
-                    SDL_GetWindowSize(a.w.win, &ww, &wh);
-                    click_center_zoom(&a, ww * 0.32f, wh * 0.38f, false);
-                    if (a.anim.active)
-                        printf("click -> %s  az %.1f  el %.1f  zoom %.2f\n",
-                               a.last_click[0] ? a.last_click : "(point)",
-                               a.anim.az1 * 180.0 / M_PI,
-                               a.anim.el1 * 180.0 / M_PI, a.anim.zoom1);
-                }
-                int min_extra = a.click_test ? 120 : 0;
-                if ((extra > min_extra && !a.anim.active
-                        && vt_idle(&a.vt)) || extra > 600)
-                    running = false;
-            }
-        } else {
-            update_free_motion(&a, dt);
-        }
-        update_anim(&a);
-        update_flat(&a);
-        if (a.frames < 0)
-            refresh_hover(&a);
-        compute_mvp(&a);
-
-        if (!a.freeze) {
-            DrawCtx fb_ctx = {&a, a.vt.prog_fb};
-            vtw_run_feedback(&a.w, &a.vt, a.vt.prog_fb, a.mvp,
-                             draw_band, &fb_ctx);
-            vt_pump_uploads(&a.vt);
-        }
-
-        glViewport(0, 0, a.w.draw_w, a.w.draw_h);
-        glClearColor(0.05f, 0.06f, 0.08f, 1);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        DrawCtx main_ctx = {&a, a.vt.prog_main};
-        vt_bind(&a.vt, a.vt.prog_main);
-        glUniform1i(glGetUniformLocation(a.vt.prog_main, "uDebug"), a.debug);
-        vt_highlight_uniforms(a.vt.prog_main, a.has_hover ? a.hover_uv : NULL,
-                              a.hi_style, (float)(now_seconds() - a.t0),
-                              a.w.dpi_scale);
-        draw_band(&main_ctx);
-        if (a.freeze)
-            vt_lines_draw(&a.lines, a.mvp);
-
-        if (!running && a.screenshot)
-            vtw_screenshot(&a.w, a.screenshot);
-        SDL_GL_SwapWindow(a.w.win);
-        frame++;
-        fps_n++;
-        if (now - fps_t > 0.5) {
-            char title[400];
-            int resident = 0;
-            for (int s = 0; s < a.vt.n_slots; s++)
-                if (a.vt.slot_page[s].level >= 0)
-                    resident++;
-            snprintf(title, sizeof title,
-                     "vt sphere viewer (C/GLES2) | %5.1f fps | resident "
-                     "%d/%d | pending %d%s%s%s",
-                     fps_n / (now - fps_t), resident, a.vt.n_slots,
-                     a.vt.n_pending, a.freeze ? " | FROZEN" : "",
-                     a.last_click[0] ? " | " : "", a.last_click);
-            SDL_SetWindowTitle(a.w.win, title);
-            fps_t = now;
-            fps_n = 0;
-        }
-    }
+    a->running = true;
+    a->loop_t0 = a->fps_t = a->prev_t = now_seconds();
+#ifdef __EMSCRIPTEN__
+    emscripten_set_main_loop_arg(frame, a, 0, true);   /* does not return */
+#else
+    while (a->running)
+        frame(a);
 
     printf("frames: %d  time: %.1fs  tiles loaded: %d\n",
-           frame, now_seconds() - t0, a.vt.loads_done);
-    vt_destroy(&a.vt);
-    SDL_GL_DeleteContext(a.w.ctx);
-    SDL_DestroyWindow(a.w.win);
+           a->frame, now_seconds() - a->loop_t0, a->vt.loads_done);
+    vt_destroy(&a->vt);
+    SDL_GL_DeleteContext(a->w.ctx);
+    SDL_DestroyWindow(a->w.win);
     SDL_Quit();
+#endif
     return 0;
 }

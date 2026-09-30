@@ -60,7 +60,7 @@ def downsample_to(src, dst, workers=1):
             pass
 
 
-def cut_tiles(level_img, level, out_dir, fmt, workers=1):
+def cut_tiles(level_img, level, out_dir, fmt, workers=1, quality=95):
     h, w = level_img.shape[:2]
     ny, nx = ceil_div(h, TILE), ceil_div(w, TILE)
     ldir = out_dir / f"L{level}"
@@ -81,7 +81,7 @@ def cut_tiles(level_img, level, out_dir, fmt, workers=1):
             if fmt == "png":
                 im.save(ldir / f"{ty}_{tx}.png", compress_level=1)
             else:
-                im.save(ldir / f"{ty}_{tx}.jpg", quality=95)
+                im.save(ldir / f"{ty}_{tx}.jpg", quality=quality)
         with lock:
             done[0] += 1
             print(f"L{level}: row {done[0]}/{ny}", end="\r", flush=True)
@@ -103,6 +103,8 @@ def main():
     ap.add_argument("--out", default=None,
                     help="output dir (default: <src stem>_pyramid)")
     ap.add_argument("--format", choices=["png", "jpg"], default="png")
+    ap.add_argument("--quality", type=int, default=95,
+                    help="JPEG quality (--format jpg; ~80 for the web)")
     ap.add_argument("--workers", type=int, default=default_workers(),
                     help="encode threads (default: half the cores)")
     args = ap.parse_args()
@@ -141,7 +143,8 @@ def main():
 
     total = 0
     for l, img in enumerate(levels):
-        total += cut_tiles(img, l, out, args.format, args.workers)
+        total += cut_tiles(img, l, out, args.format, args.workers,
+                           args.quality)
 
     del levels
     shutil.rmtree(tmp)

@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>big picture</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%237db4e0'/%3E%3Cpath d='M1 8h14M8 1c-3 3-3 11 0 14M8 1c3 3 3 11 0 14' stroke='%230d0f14' fill='none'/%3E%3C/svg%3E">
+<meta name="description" content="A gigapixel photo mosaic on a globe, streamed through a single 4096² texture: virtual texturing in C, compiled to WebAssembly.">
+<style>
+  :root {
+    --bg: #0d0f14;
+    --panel: rgba(20, 22, 27, 0.78);
+    --line: rgba(255, 255, 255, 0.12);
+    --text: #e6e6e4;
+    --muted: #9a9a97;
+    --link: #7db4e0;
+    --link-hover: #a9d0f0;
+    --accent: #ffd900;
+    --gutter: max(16px, env(safe-area-inset-left));
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { color: var(--link-hover); text-decoration: underline; }
+
+  /* CSS sizes the canvas; SDL follows it (and the device pixel ratio) */
+  #canvas {
+    position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh;
+    display: block; touch-action: none; outline: none;
+    -webkit-tap-highlight-color: transparent; user-select: none;
+  }
+
+  /* chrome floats over the canvas and lets pointer events through */
+  .hud { position: fixed; pointer-events: none; z-index: 1; }
+  .hud a, .hud button { pointer-events: auto; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+  }
+
+  #title {
+    top: var(--gutter); left: var(--gutter); padding: 8px 12px;
+    max-width: min(440px, calc(100vw - 32px - 86px));
+  }
+  #title h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
+  #title p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+
+  #buttons { top: var(--gutter); right: var(--gutter); display: flex; gap: 8px; }
+  #buttons a, #buttons button {
+    display: grid; place-items: center; width: 34px; height: 34px; padding: 0;
+    color: var(--text); font: inherit; font-weight: 600; cursor: pointer;
+  }
+  #buttons a:hover, #buttons button:hover { color: var(--link-hover); text-decoration: none; }
+  #buttons svg { width: 18px; height: 18px; fill: currentColor; }
+
+  #help {
+    top: calc(var(--gutter) + 44px); right: var(--gutter);
+    padding: 12px 14px; font-size: 13px; display: none;
+  }
+  #help.open { display: block; }
+  #help table { border-collapse: collapse; }
+  #help td { padding: 2px 0; vertical-align: top; }
+  #help td:first-child { padding-right: 14px; color: var(--muted); white-space: nowrap; }
+  #help kbd {
+    font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+    border: 1px solid var(--line); border-radius: 4px; padding: 0 5px;
+  }
+  #help .touch { display: none; }
+  @media (pointer: coarse) {
+    #help .mouse { display: none; }
+    #help .touch { display: table-row; }
+  }
+
+  #credit {
+    left: var(--gutter); bottom: max(16px, env(safe-area-inset-bottom));
+    max-width: calc(100vw - 32px); padding: 6px 10px; font-size: 13px;
+    opacity: 0; transition: opacity 0.3s;
+  }
+  #credit.show { opacity: 1; }
+
+  #status {
+    right: var(--gutter); bottom: max(16px, env(safe-area-inset-bottom));
+    max-width: calc(100vw - 32px); padding: 4px 8px;
+    color: var(--muted); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-variant-numeric: tabular-nums; text-align: right;
+  }
+  #status:empty { display: none; }
+
+  #loading {
+    position: fixed; inset: 0; display: grid; place-items: center; z-index: 2;
+    background: var(--bg); transition: opacity 0.6s; padding: 16px; text-align: center;
+  }
+  #loading.done { opacity: 0; pointer-events: none; }
+  #loading .bar {
+    width: 160px; height: 2px; margin: 14px auto 0; overflow: hidden;
+    background: var(--line); border-radius: 1px;
+  }
+  #loading .bar::after {
+    content: ""; display: block; width: 40%; height: 100%; background: var(--accent);
+    animation: slide 1.1s ease-in-out infinite;
+  }
+  #loading.error .bar { display: none; }
+  @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+  @media (prefers-reduced-motion: reduce) { #loading .bar::after { animation: none; width: 100%; } }
+
+  @media (max-width: 600px) {
+    #title p { display: none; }
+    #status { font-size: 11px; }
+    #credit { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 34px); }
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas" tabindex="-1" aria-label="Photo mosaic globe"></canvas>
+
+<div id="loading" role="status">
+  <div>
+    <div id="loading-text">Loading…</div>
+    <div class="bar"></div>
+  </div>
+</div>
+
+<header id="title" class="hud panel">
+  <h1>big picture</h1>
+  <p id="summary">Virtual texturing in C, compiled to WebAssembly.</p>
+</header>
+
+<nav id="buttons" class="hud">
+  <button id="help-toggle" class="panel" aria-expanded="false" aria-controls="help" title="Controls">?</button>
+  <a class="panel" href="https://github.com/erik-larsen/big-picture" title="Source on GitHub" aria-label="Source on GitHub">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+  </a>
+</nav>
+
+<div id="help" class="hud panel">
+  <table>
+    <tr class="mouse"><td>drag</td><td>spin the globe</td></tr>
+    <tr class="mouse"><td>scroll</td><td>zoom</td></tr>
+    <tr class="mouse"><td>click</td><td>centre that photo</td></tr>
+    <tr class="mouse"><td>double click</td><td>zoom until it fills the window</td></tr>
+    <tr class="touch"><td>drag</td><td>spin the globe</td></tr>
+    <tr class="touch"><td>pinch</td><td>zoom</td></tr>
+    <tr class="touch"><td>tap</td><td>centre that photo</td></tr>
+    <tr class="touch"><td>double tap</td><td>zoom until it fills the screen</td></tr>
+    <tr class="mouse"><td><kbd>H</kbd></td><td>cycle the outline style</td></tr>
+    <tr class="mouse"><td><kbd>L</kbd></td><td>show levels of detail</td></tr>
+    <tr class="mouse"><td><kbd>F</kbd></td><td>freeze streaming, then fly away</td></tr>
+    <tr class="mouse"><td><kbd>R</kbd></td><td>reset the view</td></tr>
+  </table>
+</div>
+
+<div id="credit" class="hud panel" aria-live="polite"></div>
+<div id="status" class="hud panel"></div>
+
+<script>
+// Tiles live in their own repo (they'd otherwise weigh on every clone of
+// the code), served from the same origin. ?tiles=URL overrides; locally
+// the default is a tiles/ folder beside this page (see export_web.py).
+const LIVE_TILES = 'https://erik-larsen.github.io/big-picture-tiles';
+const TILES = (new URLSearchParams(location.search).get('tiles')
+               || (location.hostname === 'erik-larsen.github.io' ? LIVE_TILES : 'tiles'))
+              .replace(/\/+$/, '');
+
+const $ = id => document.getElementById(id);
+let credits = {};
+
+function fail(msg) {
+  $('loading').classList.add('error');
+  $('loading').classList.remove('done');
+  $('loading-text').textContent = msg;
+}
+
+$('help-toggle').addEventListener('click', () => {
+  const open = $('help').classList.toggle('open');
+  $('help-toggle').setAttribute('aria-expanded', open);
+  $('canvas').focus();
+});
+
+// A 3x phone screen is ~9x the fragments of a 1x one for no visible gain.
+const dpr = Math.min(window.devicePixelRatio || 1, 2);
+Object.defineProperty(window, 'devicePixelRatio', { get: () => dpr });
+
+var Module = {
+  canvas: $('canvas'),
+  arguments: ['--pyramid', '/mosaic_pyramid', '--tiles', TILES],
+  print: t => console.log(t),
+  printErr: t => console.warn(t),
+  onAbort: () => fail('Something went wrong starting the viewer.'),
+
+  // meta.json and layout.json go into the in-memory filesystem before
+  // main() runs, so the C side reads them exactly as it does natively
+  preRun: [() => {
+    Module.addRunDependency('mosaic');
+    const get = (name, optional) => fetch(`${TILES}/${name}`).then(r => {
+      if (r.ok) return r.text();
+      if (optional) return null;
+      throw new Error(`${name}: HTTP ${r.status}`);
+    });
+    Promise.all([get('meta.json'), get('layout.json', true), get('credits.json', true)])
+      .then(([meta, layout, cred]) => {
+        const FS = Module.FS;
+        FS.mkdir('/mosaic_pyramid');
+        FS.writeFile('/mosaic_pyramid/meta.json', meta);
+        if (layout) FS.writeFile('/mosaic_layout.json', layout);
+        if (cred) credits = JSON.parse(cred);
+        describe(JSON.parse(meta), layout ? JSON.parse(layout).length : 0);
+        Module.removeRunDependency('mosaic');
+      })
+      .catch(e => { console.error(e); fail(`Couldn't load the mosaic from ${TILES}.`); });
+  }],
+
+  // called from C (vt_sphere_viewer.c)
+  vtReady() {
+    document.title = 'big picture';     // SDL named the tab after its window
+    $('loading').classList.add('done');
+    $('canvas').focus();
+  },
+  vtPhoto(name) {
+    const c = credits[name];
+    if (!c) return;
+    const who = document.createElement('a');
+    who.href = c.author_url || c.page;
+    who.textContent = c.author || 'unknown';
+    const photo = document.createElement('a');
+    photo.href = c.page;
+    photo.textContent = 'Photo';
+    const pexels = document.createElement('a');
+    pexels.href = 'https://www.pexels.com';
+    pexels.textContent = 'Pexels';
+    $('credit').replaceChildren(photo, ' by ', who, ' on ', pexels);
+    $('credit').classList.add('show');
+  },
+  vtStatus(fps, resident, slots, pending, loaded) {
+    const n = x => x.toLocaleString();
+    $('status').textContent =
+      `${fps.toFixed(0)} fps · ${resident}/${slots} pages resident` +
+      (pending ? ` · ${n(pending)} pending` : '') + ` · ${n(loaded)} tiles streamed`;
+  },
+};
+
+function describe(meta, images) {
+  const px = meta.image_width * meta.image_height;
+  const [n, unit] = px >= 1e9 ? [(px / 1e9).toFixed(1), 'gigapixel']
+                              : [(px / 1e6).toFixed(0), 'megapixel'];
+  const what = images ? `${images.toLocaleString()} photographs in one ${n}-${unit} mosaic`
+                      : `A ${n}-${unit} image`;
+  $('summary').textContent = `${what}, streamed through a single 4096² texture.`;
+  $('loading-text').textContent = `Loading ${n} ${unit}s…`;
+}
+
+if (!document.createElement('canvas').getContext('webgl')) {
+  fail('This needs WebGL, which this browser has turned off or doesn’t support.');
+} else {
+  const s = document.createElement('script');
+  s.src = 'vt_sphere_viewer.js';
+  s.onerror = () => fail('Couldn’t load vt_sphere_viewer.js — run c/build_web.sh first.');
+  document.body.appendChild(s);
+}
+</script>
+</body>
+</html>

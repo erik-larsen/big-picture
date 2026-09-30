@@ -248,8 +248,13 @@ def main():
             break
 
     write_credits(out, args.source, records)
+    # per-file credits, so a viewer can name whoever took the photo on
+    # screen (the web viewer does, via export_web.py)
+    (out / "photos.json").write_text(json.dumps(
+        [{k: r[k] for k in ("file", "id", "page", "author", "author_url")}
+         for r in records if (out / r["file"]).exists()], indent=1))
     print(f"\n{got} photos, {total / 1e6:.0f} MB in {out}/  "
-          f"(+ CREDITS.md)\n\n"
+          f"(+ CREDITS.md, photos.json)\n\n"
           f"Next:\n"
           f"    ./layout_mosaic.py {out} --aspect 3:1\n"
           f"    ./build_pyramid.py {out}_mosaic.npy\n"

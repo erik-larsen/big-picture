@@ -12,6 +12,12 @@
       * no integer/bit ops in GLSL ES 1.00: the feedback pass encodes
         (pageX:12, pageY:12, level:4) with mod()/floor() arithmetic.
       * derivatives come from GL_OES_standard_derivatives.
+
+    The same source builds for the web with Emscripten (build_web.sh), where
+    the loader thread gives way to the browser: tiles are fetched over HTTP
+    and decoded off the main thread by createImageBitmap, then uploaded
+    straight into the atlas. Scheduling -- which pages, coarsest first --
+    stays in C and is shared.
 */
 #ifndef VT_CORE_H
 #define VT_CORE_H
@@ -23,6 +29,8 @@
 #define VT_ATLAS_SIZE 4096
 #define VT_MAX_LEVELS 16
 #define VT_MAX_UPLOADS_PER_FRAME 24
+#define VT_MAX_INFLIGHT 24       /* web: concurrent tile fetches */
+#define VT_STALE_FRAMES 30       /* web: drop requests unwanted this long */
 
 typedef struct {
     int level, tx, ty;
@@ -61,16 +69,23 @@ typedef struct {
     VtPage *req_q;                     /* unsorted; loader picks coarsest */
     int req_count, req_cap;
     SDL_mutex *ready_mtx;
-    struct VtReady { VtPage page; unsigned char *pixels; } *ready_q;
+    struct VtReady {
+        VtPage page;
+        unsigned char *pixels;         /* native: decoded RGB, NULL = failed */
+        int bitmap;                    /* web: ImageBitmap handle, 0 = failed */
+    } *ready_q;
     int ready_count, ready_cap;
     SDL_Thread *loader;
     bool quit;
+    unsigned *wanted[VT_MAX_LEVELS];   /* per level: frame last in feedback */
+    int inflight;                      /* web: fetches not yet returned */
 
     /* GL programs (built here so both viewers share the shaders) */
     GLuint prog_main, prog_fb;
 } VtSystem;
 
 extern const char *vt_argv0;   /* program name, used in error hints */
+extern const char *vt_tile_url; /* web: tile base URL (default: the dir) */
 
 /* True if <dir>/meta.json exists; otherwise prints build instructions.
    Call before opening a window so a missing pyramid doesn't flash one. */
@@ -85,6 +100,7 @@ void vt_destroy(VtSystem *vt);
 void vt_request_from_feedback(VtSystem *vt, const unsigned char *rgba, int n);
 void vt_pump_uploads(VtSystem *vt);
 bool vt_idle(VtSystem *vt);   /* nothing pending and nothing ready */
+bool vt_root_resident(VtSystem *vt);  /* false until the web root tile lands */
 void vt_evict_unused(VtSystem *vt);  /* drop pages the latest feedback
                                         pass did not touch (freeze demo) */
 

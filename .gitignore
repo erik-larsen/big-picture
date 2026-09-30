@@ -5,7 +5,13 @@
 *_dzi/
 *_preview.png
 *_layout.json
+*_web/
 shot_*.png
+
+# web build output (c/build_web.sh), and the local tiles link
+web/vt_sphere_viewer.js
+web/vt_sphere_viewer.wasm
+web/tiles
 
 # Pixabay forbids redistributing its content on a standalone basis, so
 # those downloads stay out of git. Unsplash/Pexels sets (photos_*/) may
