@@ -240,11 +240,15 @@ static float fit_height(App *a, const float rect[4])
 }
 
 /* Opening camera height: the globe fills the window's height, or its
-   width when the window is portrait (a phone), so it is always whole. */
+   width when the window is portrait (a phone), so it is always whole.
+   A page can start in a 0x0 viewport (a pane still opening); resizes
+   re-home until the user takes over (see SDL_WINDOWEVENT below). */
 static float home_height(App *a)
 {
     int ww, wh;
     SDL_GetWindowSize(a->w.win, &ww, &wh);
+    if (ww <= 0 || wh <= 0)
+        return 12.0f;
     float tan_v = tanf(OUT_FOV * (float)M_PI / 360.0f);
     float tan_h = tan_v * (float)ww / (wh > 0 ? wh : 1);
     float half = atanf(fminf(tan_v, tan_h));
@@ -781,8 +785,11 @@ static void handle_events(App *a, bool *running)
             zoom_by(a, powf(0.92f, ev.wheel.preciseY));
             break;
         case SDL_WINDOWEVENT:
-            if (ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
+            if (ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
                 vtw_update_sizes(&a->w);
+                if (!a->user_moved && !a->anim.active)
+                    a->height = home_height(a);  /* still the opening view */
+            }
             break;
         }
     }
