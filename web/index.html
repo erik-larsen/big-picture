@@ -166,6 +166,11 @@ const TILES = (new URLSearchParams(location.search).get('tiles')
                || (location.hostname === 'erik-larsen.github.io' ? LIVE_TILES : 'tiles'))
               .replace(/\/+$/, '');
 
+// The deploy workflow stamps the commit here, so a new build's .js and
+// .wasm are fetched together, never paired with a cached other half.
+// Unstamped (local), every load is fresh.
+const BUILD = '__BUILD__'.startsWith('__') ? String(Date.now()) : '__BUILD__';
+
 const $ = id => document.getElementById(id);
 let credits = {};
 
@@ -187,6 +192,7 @@ Object.defineProperty(window, 'devicePixelRatio', { get: () => dpr });
 
 var Module = {
   canvas: $('canvas'),
+  locateFile: path => `${path}?v=${BUILD}`,
   arguments: ['--pyramid', '/mosaic_pyramid', '--tiles', TILES],
   print: t => console.log(t),
   printErr: t => console.warn(t),
@@ -196,7 +202,8 @@ var Module = {
   // main() runs, so the C side reads them exactly as it does natively
   preRun: [() => {
     Module.addRunDependency('mosaic');
-    const get = (name, optional) => fetch(`${TILES}/${name}`).then(r => {
+    // always revalidate: these say which build the (versioned) tiles are
+    const get = (name, optional) => fetch(`${TILES}/${name}`, { cache: 'no-cache' }).then(r => {
       if (r.ok) return r.text();
       if (optional) return null;
       throw new Error(`${name}: HTTP ${r.status}`);
@@ -257,7 +264,7 @@ if (!document.createElement('canvas').getContext('webgl')) {
   fail('This needs WebGL, which this browser has turned off or doesn’t support.');
 } else {
   const s = document.createElement('script');
-  s.src = 'vt_sphere_viewer.js';
+  s.src = `vt_sphere_viewer.js?v=${BUILD}`;
   s.onerror = () => fail('Couldn’t load vt_sphere_viewer.js — run c/build_web.sh first.');
   document.body.appendChild(s);
 }

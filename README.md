@@ -8,9 +8,11 @@ compiled to WebAssembly, so it runs in a browser too.
 **[Try the globe in your browser →](https://erik-larsen.github.io/big-picture/)**
 
 ![Photo globe](pics/screens/photo-globe.jpg)
-*445 mountain photographs mosaicked into a single 1.7 gigapixel image and
-wrapped onto a globe. Just 92 of the atlas's 225 pages were resident when
-this frame was drawn — reproduce it with the commands below.*
+*462 mountain photographs mosaicked into a single 1.8 gigapixel image and
+wrapped onto a globe, in the browser: portraits toward the poles, landscapes
+along the equator. Just 122 of the atlas's 225 pages were resident when this
+frame was drawn — [try it live](https://erik-larsen.github.io/big-picture/),
+or reproduce it with the commands below.*
 
 ![Flat viewer](pics/screens/flat-viewer.png)
 *The 16384² synthetic test image, orbited at 1155 fps. The title bar tracks
@@ -80,17 +82,30 @@ API key, which takes about a minute to get:
 
 ```sh
 export PEXELS_API_KEY=your_key_here
-./fetch_photos.py --source pexels --count 1024 --query mountains --width 2400 --budget-mb 250
-./layout_mosaic.py pics/photos_mountains --aspect 3:1
+for o in landscape portrait; do
+    ./fetch_photos.py --source pexels --query mountains --orientation $o \
+        --width 2400 --budget-mb 125 --out pics/photos_mountains/$o
+done
+./layout_mosaic.py pics/photos_mountains --aspect 3:1 --by-latitude
 ./build_pyramid.py pics/photos_mountains_mosaic.npy
 ./vt_sphere_viewer.py pics/photos_mountains_mosaic_pyramid
 ```
 
-`--budget-mb` stops the download once it has 250 MB on disk, so at 2400px
-that lands around 445 photographs rather than the full 1024 — a **1.7
-gigapixel** mosaic (71936×23979), wrapped into a full 360° globe. Pick any
+`--budget-mb` stops each download once it has 125 MB on disk, so at 2400px
+that lands around 460 photographs in all — a **1.8 gigapixel** mosaic
+(73728×24576), wrapped into a full 360° globe. Pick any
 `--query` you like. `CREDITS.md` is written beside the photos, crediting
 every photographer.
+
+Half the budget goes to landscape photos and half to portrait, each in its
+own subfolder. Searched with no orientation at all, Pexels answers
+"mountains" with nine portraits in ten, so ask for each shape by name.
+`--width` bounds the longer side, so a portrait costs no more pixels than
+a landscape. `--by-latitude` then lays them out for a globe rather than by
+folder: portrait toward the poles, landscape along the equator. Near a
+pole, a row wraps a small circle, so a wide photo there spans many degrees
+of longitude and visibly bows along it, while a narrow one stays nearly
+rectangular. The equator is a great circle, where width costs nothing.
 
 `--source unsplash` and `--source pixabay` work the same way, reading
 `UNSPLASH_ACCESS_KEY` or `PIXABAY_API_KEY` instead.
@@ -197,8 +212,8 @@ settle, and saves the frame.
 | --- | --- |
 | `gen_test_image_16k.py` | 16384² pattern: **R** = U, **G** = V, **B** = checkerboard + zone plate (a radial chirp — the classic aliasing test), with every 256px cell labelled `A1`-style so you always know where you are. |
 | `gen_test_image_tree.py` | A synthetic stand-in for a photo collection: gradient cards labelled with their folder path, index, and size, filed into nested subfolders. Deterministic from `--seed`, so the mosaic and pyramid are reproducible byte for byte. |
-| `fetch_photos.py` | Downloads N royalty-free photographs via the official Unsplash, Pexels, or Pixabay API. Each is asked for photos only, so illustrations and AI artwork are excluded server-side. Resumable, and writes a `CREDITS.md` crediting every photographer. |
-| `layout_mosaic.py` | Folder tree → one giant mosaic, justified rows (each row spans the full width, aspect preserved). Auto-sizes the canvas so images land at ~native resolution. Writes a `layout.json` of every image's rectangle. `--aspect`, `--width`, `--gap`, `--workers`. |
+| `fetch_photos.py` | Downloads N royalty-free photographs via the official Unsplash, Pexels, or Pixabay API. Each is asked for photos only, so illustrations and AI artwork are excluded server-side. Landscape only unless `--every-shape`. Resumable, and writes a `CREDITS.md` crediting every photographer, plus `photos.json` crediting each file. |
+| `layout_mosaic.py` | Folder tree → one giant mosaic, justified rows (each row spans the full width, aspect preserved). Auto-sizes the canvas so images land at ~native resolution. Writes a `layout.json` of every image's rectangle. `--aspect`, `--width`, `--gap`, `--workers`, and `--by-latitude` to order by shape for a globe instead of by folder. |
 | `build_pyramid.py` | Any rectangular `.npy` → tile pyramid, L0 = full res up to a single root tile (7 levels / 5461 tiles for the test image). Partial edge tiles are edge-padded. `--format jpg` for smaller tiles, `--workers` for the encode pool. |
 | `export_web.py` | Pyramid → a folder for the web viewer: the tiles (hard-linked, not copied), `meta.json`, the layout with paths cut to basenames, and `credits.json` naming the photographer of every photo, from the `photos.json` that `fetch_photos.py` writes. |
 | `export_dzi.py` | Pyramid → Deep Zoom, viewable in OpenSeadragon in a browser. Re-crops to DZI's edge-tile convention, flips the level numbering, and writes `image.dzi` + a ready `viewer.html`. |
@@ -327,6 +342,13 @@ wasm memory. Network latency is far longer than a disk read, so a fast
 fling can queue hundreds of pages that have scrolled away before their
 turn comes. Requests that no feedback pass has asked for in 30 frames are
 dropped, and simply re-requested if they come back into view.
+
+Tile names repeat from build to build, and GitHub Pages lets browsers
+cache for ten minutes, so a republished mosaic could come up as a patchwork
+of old and new tiles. `export_web.py` stamps a version into `meta.json`,
+which the page always revalidates, and every tile URL carries it. The deploy
+workflow likewise stamps the commit into `index.html`, so a new `.js` is
+never paired with a cached `.wasm`.
 
 Before `main()` runs, the page writes `meta.json` and the layout into
 Emscripten's in-memory filesystem, so `vt_init` reads them with the same

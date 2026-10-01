@@ -3,10 +3,13 @@
 
 Writes a self-contained folder any static host can serve:
 
-  <out>/meta.json      pyramid metadata, as build_pyramid.py wrote it
+  <out>/meta.json      pyramid metadata, plus a version stamp the viewer
+                       puts on tile URLs, so a rebuild's tiles never
+                       mix with a browser's cached ones
   <out>/layout.json    each image's rectangle, paths cut to basenames
   <out>/credits.json   basename -> photographer, when the photos came
                        from fetch_photos.py (it writes photos.json)
+  <out>/CREDITS.md     every photographer, across all the photo folders
   <out>/L{level}/...   the tiles, hard-linked where possible (no copy)
 
 Build the pyramid as JPEG for the web -- PNG tiles run 5-10x larger:
@@ -22,7 +25,10 @@ import argparse
 import json
 import os
 import shutil
+import time
 from pathlib import Path
+
+from fetch_photos import write_credits
 
 
 def link_or_copy(src, dst):
@@ -49,28 +55,34 @@ def main():
     out = Path(args.out or pyr.parent / f"{stem}_web")
     out.mkdir(parents=True, exist_ok=True)
 
-    shutil.copy2(pyr / "meta.json", out / "meta.json")
+    meta["version"] = time.strftime("%Y%m%d%H%M%S")
+    (out / "meta.json").write_text(json.dumps(meta, indent=2))
 
     layout_path = pyr.parent / f"{stem}_layout.json"
-    credits = {}
+    credits, records = {}, []
     if layout_path.exists():
         layout = json.loads(layout_path.read_text())
         photo_dirs = {Path(r["path"]).parent for r in layout}
         for r in layout:
             r["path"] = Path(r["path"]).name
         (out / "layout.json").write_text(json.dumps(layout, separators=(",", ":")))
-        for d in photo_dirs:
+        placed = {r["path"] for r in layout}
+        for d in sorted(photo_dirs):
             if (d / "photos.json").exists():
                 for p in json.loads((d / "photos.json").read_text()):
-                    credits[p["file"]] = {k: p[k] for k in
-                                          ("author", "author_url", "page")}
-            if (d / "CREDITS.md").exists():
-                shutil.copy2(d / "CREDITS.md", out / "CREDITS.md")
+                    if p["file"] in placed:
+                        records.append(p)
+                        credits[p["file"]] = {k: p[k] for k in
+                                              ("author", "author_url", "page")}
         print(f"layout: {len(layout)} images, {len(credits)} credited")
     else:
         print(f"no {layout_path.name}: no hover outlines or credits")
     if credits:
         (out / "credits.json").write_text(json.dumps(credits, indent=0))
+        # one list across every folder the photos came from
+        source = next((s for s in ("pexels", "unsplash", "pixabay")
+                       if s in records[0]["page"]), "the web")
+        write_credits(out, source, records)
 
     n, size = 0, 0
     for level in range(meta["levels"]):

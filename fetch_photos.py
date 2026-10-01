@@ -52,25 +52,34 @@ def get_json(url, headers=None):
 
 # ------------------------------------------------------------- sources
 # Each returns (records, extra_headers). A record is
-# {url, id, page, author, author_url}.
+# {url, id, page, author, author_url}. `width` bounds the longer side, so
+# a portrait photo costs no more pixels than a landscape one.
 
-def from_unsplash(key, query, count, width, quality):
+def orient(orientation, names=None):
+    """The API's orientation parameter, or none for "any"."""
+    if orientation == "any":
+        return {}
+    return {"orientation": (names or {}).get(orientation, orientation)}
+
+
+def from_unsplash(key, query, count, width, quality, orientation):
     hdr = {"Authorization": f"Client-ID {key}"}
     out, page, per = [], 1, 30                    # 30 is the API maximum
     while len(out) < count:
         u = ("https://api.unsplash.com/search/photos?"
              + urllib.parse.urlencode({"query": query, "per_page": per,
                                        "page": page,
-                                       "orientation": "landscape",
-                                       "content_filter": "high"}))
+                                       "content_filter": "high",
+                                       **orient(orientation, {
+                                           "square": "squarish"})}))
         res = get_json(u, hdr).get("results", [])
         if not res:
             break
         for p in res:
             out.append({
-                # raw is Imgix-backed, so ask for an exact width
-                "url": (p["urls"]["raw"] + f"&w={width}&q={quality}"
-                        "&fm=jpg&fit=max"),
+                # raw is Imgix-backed, so bound the longer side exactly
+                "url": (p["urls"]["raw"] + f"&w={width}&h={width}"
+                        f"&q={quality}&fm=jpg&fit=max"),
                 "id": p["id"],
                 "page": p["links"]["html"],
                 "author": p["user"]["name"],
@@ -84,21 +93,22 @@ def from_unsplash(key, query, count, width, quality):
     return out[:count], hdr
 
 
-def from_pexels(key, query, count, width, quality):
+def from_pexels(key, query, count, width, quality, orientation):
     hdr = {"Authorization": key}
     out, page, per = [], 1, 80                    # 80 is the API maximum
     while len(out) < count:
         u = ("https://api.pexels.com/v1/search?"
              + urllib.parse.urlencode({"query": query, "per_page": per,
                                        "page": page,
-                                       "orientation": "landscape"}))
+                                       **orient(orientation)}))
         res = get_json(u, hdr).get("photos", [])
         if not res:
             break
         for p in res:
+            side = "h" if p.get("height", 0) > p.get("width", 0) else "w"
             out.append({
                 "url": (p["src"]["original"] + "?auto=compress&cs=tinysrgb"
-                        f"&fm=jpg&w={width}&q={quality}"),
+                        f"&fm=jpg&{side}={width}&q={quality}"),
                 "id": str(p["id"]),
                 "page": p["url"],
                 "author": p.get("photographer", ""),
@@ -111,13 +121,17 @@ def from_pexels(key, query, count, width, quality):
     return out[:count], hdr
 
 
-def from_pixabay(key, query, count, width, quality):   # fixed sizes only
+def from_pixabay(key, query, count, width, quality,
+                 orientation):                     # fixed sizes only
     out, page, per = [], 1, 200                   # 200 is the API maximum
     while len(out) < count:
         u = ("https://pixabay.com/api/?"
              + urllib.parse.urlencode({"key": key, "q": query,
                                        "image_type": "photo",
-                                       "orientation": "horizontal",
+                                       **orient(orientation, {
+                                           "landscape": "horizontal",
+                                           "portrait": "vertical",
+                                           "square": "all"}),  # no square
                                        "per_page": per, "page": page,
                                        "safesearch": "true"}))
         data = get_json(u)
@@ -181,7 +195,12 @@ def main():
     ap.add_argument("--query", default="scenery")
     ap.add_argument("--count", type=int, default=1024)
     ap.add_argument("--width", type=int, default=1080,
-                    help="requested width in px (unsplash/pexels)")
+                    help="requested size of the longer side in px "
+                         "(unsplash/pexels)")
+    ap.add_argument("--orientation", default="landscape",
+                    choices=["landscape", "portrait", "square", "any"],
+                    help="photo shape to search for (default: landscape). "
+                         "For a mix, fetch each into its own subfolder")
     ap.add_argument("--quality", type=int, default=78,
                     help="JPEG quality (unsplash/pexels)")
     ap.add_argument("--budget-mb", type=float, default=0,
@@ -210,7 +229,7 @@ def main():
     print(f"searching {args.source} for '{args.query}' (photographs only)...")
     try:
         records, hdr = fetch(key, args.query, args.count,
-                             args.width, args.quality)
+                             args.width, args.quality, args.orientation)
     except urllib.error.HTTPError as e:
         raise SystemExit(f"API request failed: HTTP {e.code} {e.reason}\n"
                          f"(check the key, and the source's rate limit)")

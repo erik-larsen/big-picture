@@ -40,6 +40,7 @@ typedef struct {
     /* pyramid metadata */
     char dir[1024];
     char format[8];          /* "png" or "jpg" */
+    char version[32];        /* web: build stamp, busts cached tiles */
     int virt_w, virt_h;
     int tile, border, slot_px;
     int levels;

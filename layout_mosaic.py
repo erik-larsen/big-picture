@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Lay out a folder tree of images into one giant mosaic (16:9 default).
 
-Images are gathered recursively (sorted by path, so folders stay grouped),
-then placed with a justified-rows layout: every row is scaled to span the
+Images are gathered recursively (sorted by path, so folders stay grouped,
+or with --by-latitude by shape, for a globe), then placed with a
+justified-rows layout: every row is scaled to span the
 full canvas width while preserving each image's aspect ratio, and the row
 height is chosen so the rows collectively fill the canvas height. The
 canvas aspect is configurable (--aspect 16:9, 3:1, 2.35, ...) and the
@@ -44,24 +45,59 @@ def gather(src_dir):
     return items
 
 
+def order_by_latitude(items):
+    """Narrow photos toward the poles, wide ones along the equator.
+
+    On a globe a row near a pole wraps a small circle, so a wide photo
+    there spans many degrees of longitude and visibly bows along the
+    latitude line; a narrow one spans few and stays nearly rectangular.
+    The equator is a great circle, where width costs nothing. So deal the
+    photos out narrowest first from both ends of the canvas, meeting at
+    the widest in the middle. Folder grouping gives way to this, which
+    suits a collection whose photos are all of a kind."""
+    by_aspect = sorted(items, key=lambda it: (it["aspect"], str(it["path"])))
+    return by_aspect[0::2] + by_aspect[1::2][::-1]
+
+
+def break_rows(items, W, row_h):
+    """Greedy row breaks for a target row height: lists of items whose
+    aspect ratios, laid side by side at row_h, span at least W. A short
+    last row folds into the one above rather than leave a hole."""
+    rows, cur, cur_a = [], [], 0.0
+    for it in items:
+        cur.append(it)
+        cur_a += it["aspect"]
+        if cur_a * row_h >= W:
+            rows.append(cur)
+            cur, cur_a = [], 0.0
+    if cur:
+        if cur_a * row_h < W / 2 and rows:
+            rows[-1] += cur
+        else:
+            rows.append(cur)
+    return rows
+
+
 def layout_rows(items, W, H):
-    """Justified rows: returns rows as (row_height, [items]) filling W x H."""
-    total_aspect = sum(it["aspect"] for it in items)
-    row_h = math.sqrt(W * H / total_aspect)      # ideal row height
-    for _ in range(6):                           # converge on canvas height
-        rows, cur, cur_a = [], [], 0.0
-        for it in items:
-            cur.append(it)
-            cur_a += it["aspect"]
-            if cur_a * row_h >= W:
-                rows.append((W / cur_a, cur))    # justify to full width
-                cur, cur_a = [], 0.0
-        if cur:
-            rows.append((min(row_h, W / cur_a), cur))
-        total_h = sum(h for h, _ in rows)
-        row_h *= H / total_h
-    scale = min(H / total_h, 1.0)                # never overflow the canvas
-    return [(h * scale, row) for h, row in rows]
+    """Justified rows exactly filling W x H: returns (row_height, [items]).
+
+    Justifying a row to width W fixes its height (W over its summed
+    aspect), so the total height depends only on where the rows break --
+    and it moves in steps, rarely landing on H. Try the breaks for a range
+    of target heights, keep whichever total comes closest, then stretch it
+    to H. Photos come out a hair off true (typically ~1%) instead of
+    leaving an empty band or a ragged last row: on a globe, a hole at the
+    pole or a gap down the seam."""
+    ideal = math.sqrt(W * H / sum(it["aspect"] for it in items))
+    best = None
+    for k in range(400):
+        rows = break_rows(items, W, ideal * (0.5 + k / 400))
+        total = sum(W / sum(it["aspect"] for it in r) for r in rows)
+        err = abs(math.log(total / H))
+        if best is None or err < best[0]:
+            best = (err, total, rows)
+    _, total, rows = best
+    return [(W / sum(it["aspect"] for it in r) * H / total, r) for r in rows]
 
 
 def main():
@@ -75,6 +111,10 @@ def main():
     ap.add_argument("--aspect", default="16:9",
                     help="canvas aspect ratio as W:H or a float "
                          "(e.g. 16:9, 3:1, 2.35)")
+    ap.add_argument("--by-latitude", action="store_true",
+                    help="order by shape for a globe: portrait photos "
+                         "toward the poles, landscape toward the equator "
+                         "(instead of by folder)")
     ap.add_argument("--gap", type=int, default=8,
                     help="visual gap between images, in pixels")
     ap.add_argument("--workers", type=int, default=default_workers(),
@@ -97,6 +137,8 @@ def main():
     items = gather(args.src)
     if not items:
         raise SystemExit(f"no images found under {args.src}")
+    if args.by_latitude:
+        items = order_by_latitude(items)
 
     if ":" in args.aspect:
         aw, ah = args.aspect.split(":")
@@ -136,9 +178,10 @@ def main():
     y = 0.0
     for rh, row in layout_rows(items, W, H):
         x, y0, y1 = 0.0, round(y), round(y + rh)
+        per_aspect = W / sum(it["aspect"] for it in row)   # spans exactly W
         for it in row:
-            x0, x1 = round(x), round(x + it["aspect"] * rh)
-            x += it["aspect"] * rh
+            x0, x1 = round(x), round(x + it["aspect"] * per_aspect)
+            x += it["aspect"] * per_aspect
             ix0, ix1 = min(x0 + g, W), min(x1 - g, W)
             iy0, iy1 = y0 + g, min(y1 - g, H)
             if ix1 - ix0 >= 2 and iy1 - iy0 >= 2:

@@ -31,6 +31,7 @@ jobs:
         with:
           version: 4.0.13
       - run: cd c && ./build_web.sh
+      - run: sed -i "s/__BUILD__/${GITHUB_SHA::12}/g" web/index.html
       - uses: actions/upload-pages-artifact@v3
         with:
           path: web

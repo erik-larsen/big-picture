@@ -391,10 +391,14 @@ void vt_highlight_uniforms(GLuint prog, const float rect_uv[4], int style,
 
 /* --------------------------------------------------------------- loader */
 
+/* Over HTTP each export carries its own ?v=, since tile names repeat
+   from build to build and a browser would happily mix in cached ones. */
 static void tile_path(VtSystem *vt, VtPage p, char *out, int cap)
 {
-    snprintf(out, cap, "%s/L%d/%d_%d.%s", vt_tile_url ? vt_tile_url : vt->dir,
-             p.level, p.ty, p.tx, vt->format);
+    bool v = vt_tile_url && vt->version[0];
+    snprintf(out, cap, "%s/L%d/%d_%d.%s%s%s",
+             vt_tile_url ? vt_tile_url : vt->dir, p.level, p.ty, p.tx,
+             vt->format, v ? "?v=" : "", v ? vt->version : "");
 }
 
 static void push_ready(VtSystem *vt, VtPage p, unsigned char *pix, int bitmap)
@@ -778,6 +782,7 @@ bool vt_init(VtSystem *vt, const char *pyramid_dir)
     vt->border = json_int(meta, "border", 2);
     vt->levels = json_int(meta, "levels", 1);
     json_str(meta, "format", vt->format, sizeof vt->format);
+    json_str(meta, "version", vt->version, sizeof vt->version);
     free(meta);
     if (!vt->virt_w || !vt->virt_h || vt->levels > VT_MAX_LEVELS) {
         fprintf(stderr, "bad meta.json\n");
