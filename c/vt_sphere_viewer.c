@@ -10,7 +10,7 @@
     (via <pyramid>_layout.json) with an eased glide, and double-clicking
     it again zooms back out. A photo zoomed to fill the window is snapped:
     dragging far enough toward a neighbour glides on to that one, until
-    zooming out lets go. Trackball fling inertia and slow idle auto-rotate
+    zooming in or out lets go. Trackball fling inertia and slow idle auto-rotate
     included.
 
     Usage: vt_sphere_viewer [--pyramid DIR] [--inside] [--manifest F]
@@ -126,7 +126,8 @@ typedef struct {
 
     /* Snap mode: entered by fitting a photo to the window. Letting go of
        a drag far enough past its edge glides on to the neighbour that
-       way; zooming out until the photo no longer fills the window leaves. */
+       way; zooming in or out from the fit leaves, so a closer look pans
+       freely. */
     int snap;                   /* snapped photo, -1 = not snapped */
     float pre_fit_zoom;         /* height before the fit, to go back to */
     /* the second click of a double lands mid-glide, so it acts on what
@@ -609,15 +610,17 @@ static void snap_release(App *a)
         glide_to(a, c[0] + rest[0], c[1] + rest[1], a->height);
 }
 
-/* zooming out until the snapped photo no longer fills the window leaves
-   snap mode (glides excepted: they pass through on the way to a fit) */
+/* zooming in or out from the fit leaves snap mode: out, the photo no
+   longer fills the window; in, panning around it should not snap (glides
+   excepted: they pass through on the way to a fit) */
 static void update_snap(App *a)
 {
     if (a->snap < 0 || a->anim.active)
         return;
     float r[4];
     photo_rect(a, a->snap, r);
-    if (a->height > 1.02f * fit_height(a, r))
+    float fit = fit_height(a, r);
+    if (a->height > 1.02f * fit || a->height < 0.98f * fit)
         a->snap = -1;
 }
 

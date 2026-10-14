@@ -189,8 +189,8 @@ pointer 1:1, but letting go a fifth of a window past the photo's edge (or
 flicking toward it) glides on to the neighbour that way and fits it in
 turn; anything less springs back. Clicking a neighbour snaps to it too, and
 double clicking the snapped photo returns to the zoom you double clicked
-from. Zoom out until the photo no longer fills the window and the globe is
-free again.
+from. Zoom in or out and the snap lets go: out, the globe is free again;
+in, you can pan around the photo without being pulled to its neighbours.
 
 The sphere viewer opens in an attract spin — a slow auto-rotate that stops
 for good the moment you touch the view, and comes back on **R**

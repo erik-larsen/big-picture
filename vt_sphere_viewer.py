@@ -19,7 +19,7 @@ clicked file's name is shown in the window title.
 
 Double-clicking zooms until the image fills the window, which snaps to
 it: letting go of a drag far enough past its edge glides on to the
-neighbour that way, until zooming out lets go. Double-clicking the
+neighbour that way, until zooming in or out lets go. Double-clicking the
 snapped image zooms back to where you were before.
 
 Streaming, page table, atlas, and shaders are shared with vt_viewer.py —
@@ -31,7 +31,7 @@ Controls: drag = orbit / look around | scroll = zoom
           double click = zoom until it fills the window (flattening it);
                          again to zoom back out
           snapped (zoomed to fill the window): drag well past the photo's
-                         edge to glide on to its neighbour; zoom out to leave
+                         edge to glide on to its neighbour; zoom to leave
           H = cycle highlight style
           F = freeze/unfreeze streaming (explore the frozen LOD state)
           L = LOD debug overlay | R = reset view | ESC = quit
@@ -235,7 +235,8 @@ class SphereViewer:
         self._last_click_t = 0.0
         # Snap mode: entered by fitting a photo to the window. Letting go
         # of a drag far enough past its edge glides on to the neighbour
-        # that way; zooming out until it no longer fills the window leaves.
+        # that way; zooming in or out from the fit leaves, so a closer look
+        # pans freely.
         self.snap = None                   # snapped photo's rect, or None
         self._pre_fit_zoom = self.height   # height before the fit
         # the second click of a double lands mid-glide, so it acts on what
@@ -676,12 +677,13 @@ class SphereViewer:
             self.glide_to(c[0] + rest[0], c[1] + rest[1], self.height)
 
     def update_snap(self):
-        """Zooming out until the snapped photo no longer fills the window
-        leaves snap mode (glides excepted: they pass through on the way
-        to a fit)."""
-        if (self.snap and self._anim is None
-                and self.height > 1.02 * self.fit_height(self.snap)):
-            self.snap = None
+        """Zooming in or out from the fit leaves snap mode: out, the photo
+        no longer fills the window; in, panning around it should not snap
+        (glides excepted: they pass through on the way to a fit)."""
+        if self.snap and self._anim is None:
+            fit = self.fit_height(self.snap)
+            if not 0.98 * fit <= self.height <= 1.02 * fit:
+                self.snap = None
 
     def update_free_motion(self, dt):
         """Trackball inertia after a fling, and slow idle auto-rotate."""
