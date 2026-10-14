@@ -17,13 +17,21 @@ Clicking glides the camera (ease-in/ease-out) to center the clicked
 the clicked point — by moving the camera's azimuth/elevation. The
 clicked file's name is shown in the window title.
 
+Double-clicking zooms until the image fills the window, which snaps to
+it: letting go of a drag far enough past its edge glides on to the
+neighbour that way, until zooming out lets go. Double-clicking the
+snapped image zooms back to where you were before.
+
 Streaming, page table, atlas, and shaders are shared with vt_viewer.py —
 virtual texturing doesn't care what geometry the UVs live on.
 
 Controls: drag = orbit / look around | scroll = zoom
           hover = outline the mosaic image under the pointer
           click = center the view on the clicked image
-          double click = zoom until it fills the window (flattening it)
+          double click = zoom until it fills the window (flattening it);
+                         again to zoom back out
+          snapped (zoomed to fill the window): drag well past the photo's
+                         edge to glide on to its neighbour; zoom out to leave
           H = cycle highlight style
           F = freeze/unfreeze streaming (explore the frozen LOD state)
           L = LOD debug overlay | R = reset view | ESC = quit
@@ -197,6 +205,10 @@ class SphereViewer:
         self.debug = 0
         self.freeze = 0
         self.hover = None                  # (u0, v0, u1, v1, name)
+        # Outline the photo just clicked or snapped to: moving the camera
+        # to it leaves something else under a still pointer, so the
+        # outline stays put until the pointer actually moves.
+        self._hover_pinned = False
         self.hi_style = args.hi_style
         self._t0 = time.time()
         self._drag = None
@@ -221,6 +233,14 @@ class SphereViewer:
             du = dv = 1 / 12          # no manifest: a sensible screenful
         self.ref_rect = (0.0, 0.0, du, dv)
         self._last_click_t = 0.0
+        # Snap mode: entered by fitting a photo to the window. Letting go
+        # of a drag far enough past its edge glides on to the neighbour
+        # that way; zooming out until it no longer fills the window leaves.
+        self.snap = None                   # snapped photo's rect, or None
+        self._pre_fit_zoom = self.height   # height before the fit
+        # the second click of a double lands mid-glide, so it acts on what
+        # the first click hit, and on the snap as it stood before it
+        self._click = None                 # (x, y, uv, rect, snap before)
         self.flat_w = 2 * self.lon_half * RADIUS
         self.flat_h = 2 * LAT_MAX * RADIUS
         glfw.set_mouse_button_callback(self.win, self.on_mouse_button)
@@ -355,25 +375,42 @@ class SphereViewer:
                 self._vel = [0.0, 0.0]
                 now = time.time()
                 dbl = now - self._last_click_t < 0.35
-                self._last_click_t = now
+                self._last_click_t = 0.0 if dbl else now   # no triple
                 self.click_center_zoom(*pos, fit=dbl)
-            elif (self._move_t is None
-                    or time.time() - self._move_t > 0.12):
-                self._vel = [0.0, 0.0]  # held still before release: no fling
+            else:
+                if (self._move_t is None
+                        or time.time() - self._move_t > 0.12):
+                    self._vel = [0.0, 0.0]  # held still: no fling
+                if self.snap and button == glfw.MOUSE_BUTTON_LEFT:
+                    self.snap_release()
             self._drag = None
             self._press = None
 
-    def drag_rate(self):
+    def drag_rates(self):
+        """Camera turn per pixel of drag (az, el), in radians, so that what
+        sits at the view centre follows the pointer 1:1. A pixel there
+        spans 2 h tan(fov/2) / window-height of the surface, the camera
+        being h away (outside), or that many radians of view (inside).
+        Turning in azimuth moves the globe by cos(el) of that at the
+        centre, but the flattened plane by all of it, so blend as the
+        surface flattens."""
+        _, wh = glfw.get_window_size(self.win)
+        fov = self.fov if self.inside else OUT_FOV
+        px = 2 * math.tan(math.radians(fov) / 2) / max(wh, 1)
+        c = max(math.cos(self.el), 0.2)
         if self.inside:
-            return 0.0025 * self.fov / 70.0     # slower when zoomed in
-        return 0.005 * min(max(self.height / RADIUS, 0.03), 1.5)
+            r_el = px
+        else:
+            r_el = px * self.height / RADIUS
+            c += (1 - c) * self.flat
+        return r_el / c, r_el
 
     def refresh_hover(self):
         """Recompute the hovered image from the last cursor position: the
         camera moves on its own (glides, inertia, attract spin), so what
         sits under a stationary pointer changes without any mouse event."""
-        if not self.manifest or not glfw.get_window_attrib(self.win,
-                                                           glfw.HOVERED):
+        if (not self.manifest or self._hover_pinned
+                or not glfw.get_window_attrib(self.win, glfw.HOVERED)):
             return
         self.update_hover(*glfw.get_cursor_pos(self.win))
 
@@ -396,6 +433,8 @@ class SphereViewer:
                     fw / ww if ww else 1.0)
 
     def on_cursor(self, win, x, y):
+        if not (self.snap and self._drag):  # a snapped drag keeps the
+            self._hover_pinned = False      # snapped photo outlined
         if not self._drag:
             self.update_hover(x, y)
             return
@@ -404,8 +443,8 @@ class SphereViewer:
         self._user_moved = True
         px, py = self._drag
         self._drag = (x, y)
-        rate = self.drag_rate()
-        daz, del_ = -(x - px) * rate, (y - py) * rate
+        r_az, r_el = self.drag_rates()
+        daz, del_ = -(x - px) * r_az, (y - py) * r_el
         self.az = wrap_pi(self.az + daz)
         self.el = min(max(self.el + del_, -LAT_MAX - 0.25), LAT_MAX + 0.25)
         # velocity estimate for release momentum (smoothed, capped)
@@ -443,6 +482,7 @@ class SphereViewer:
             print(f"highlight style {self.hi_style}: {HI_STYLES[self.hi_style]}")
         elif key == glfw.KEY_R:
             self._anim = None
+            self.snap = None
             self.az, self.el = 0.0, 0.0
             self.fov, self.height = 75.0, 12.0
             self._vel = [0.0, 0.0]
@@ -514,39 +554,134 @@ class SphereViewer:
         construction, so the flattening never snaps sideways."""
         return self.az, self.el
 
-    # ---- click: center the image under the cursor, zoom +50% ----------
-    def click_center_zoom(self, cx, cy, duration=0.5, fit=False):
-        """Single click centres the picture; a double click also zooms in
-        until it exactly fills the window."""
-        uv = self.cursor_uv(cx, cy)
-        if uv is None:
-            return
-        cu, cv = uv
-        rect = None
-        if self.manifest:
-            px, py = cu * self.vt.virt_w, cv * self.vt.virt_h
-            for r in self.manifest:
-                if (r["x"] <= px < r["x"] + r["w"]
-                        and r["y"] <= py < r["y"] + r["h"]):
-                    cu = (r["x"] + r["w"] / 2) / self.vt.virt_w
-                    cv = (r["y"] + r["h"] / 2) / self.vt.virt_h
-                    rect = (r["x"] / self.vt.virt_w, r["y"] / self.vt.virt_h,
-                            (r["x"] + r["w"]) / self.vt.virt_w,
-                            (r["y"] + r["h"]) / self.vt.virt_h)
-                    self._last_click = Path(r["path"]).name
-                    break
-        zoom = self.fov if self.inside else self.height
-        end_zoom = zoom                        # single click: centre only
-        if fit and rect and not self.inside:
-            end_zoom = self.fit_height(rect)
+    # ---- click: center, fit, snap -------------------------------------
+    def view_uv(self):
+        """Where the view is centred, in mosaic uv."""
+        return (0.5 + self.az / (2 * self.lon_half),
+                0.5 - self.el / (2 * LAT_MAX))
+
+    def view_half_uv(self):
+        """Half the window's extent in mosaic uv, once flat."""
+        w, h = glfw.get_framebuffer_size(self.win)
+        tan_v = math.tan(math.radians(OUT_FOV) / 2)
+        tan_h = tan_v * (w / max(h, 1))
+        return (self.height * tan_h / self.flat_w,
+                self.height * tan_v / self.flat_h)
+
+    def glide_to(self, cu, cv, end_zoom, duration=0.5):
+        """Eased glide that centres (cu, cv) at the given zoom."""
         az1 = (cu - 0.5) * 2 * self.lon_half
         el1 = (0.5 - cv) * 2 * LAT_MAX
         self._anim = {
             "t": time.time(), "dur": duration,
             "az0": self.az, "az1": self.az + wrap_pi(az1 - self.az),
             "el0": self.el, "el1": el1,
-            "zoom0": zoom, "zoom1": end_zoom,
+            "zoom0": self.fov if self.inside else self.height,
+            "zoom1": end_zoom,
         }
+        self._vel = [0.0, 0.0]
+
+    def pin_hover(self, rect):
+        self.hover = rect
+        self._hover_pinned = True
+        self._last_click = rect[4]
+
+    def snap_to(self, rect):
+        """Centre the photo and zoom until it fills the window: snap mode."""
+        if self.snap is None:
+            self._pre_fit_zoom = self.height
+        self.snap = rect
+        self.pin_hover(rect)
+        self.glide_to((rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2,
+                      self.fit_height(rect))
+
+    def click_center_zoom(self, cx, cy, fit=False):
+        """Single click centres the picture (or the point) at the same
+        zoom; in snap mode a different picture is snapped to instead.
+        Double click snaps to the picture or, on the one already snapped,
+        zooms back to before the fit."""
+        dbl = (fit and self._click is not None
+               and abs(cx - self._click[0]) <= 24
+               and abs(cy - self._click[1]) <= 24)
+        if dbl:
+            _, _, uv, rect, prev_snap = self._click
+        else:
+            uv = self.cursor_uv(cx, cy)
+            if uv is None:
+                self._click = None
+                return
+            rect = rect_at_uv(self.manifest, uv[0], uv[1],
+                              self.vt.virt_w, self.vt.virt_h)
+            prev_snap = None
+            self._click = (cx, cy, uv, rect, self.snap)
+        zoom = self.fov if self.inside else self.height
+        if rect is None:                       # between photos: the point
+            self._hover_pinned = False
+            self.glide_to(uv[0], uv[1], zoom)
+            return
+        centre = ((rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2)
+        if not self.inside:
+            if dbl and rect == prev_snap and rect == self.snap:
+                self.snap = None               # back to before the fit
+                self.pin_hover(rect)
+                self.glide_to(*centre, self._pre_fit_zoom)
+                return
+            if dbl or (self.snap and rect != self.snap):
+                self.snap_to(rect)
+                return
+        self.pin_hover(rect)
+        self.glide_to(*centre, zoom)           # single click: centre only
+
+    def snap_release(self):
+        """Snap mode, letting go of a drag: past the snapped photo's edge
+        by a fifth of the window -- a flick's momentum counts -- glides on
+        to the neighbour that way. Short of that it springs back so the
+        window stays on the photo (or centred on it, along a side it does
+        not fill)."""
+        r = self.snap
+        view = self.view_half_uv()
+        d = list(self.view_uv())
+        full_wrap = self.lon_half >= math.pi - 1e-6
+        fling = (self._vel[0] * 0.25 / (2 * self.lon_half),
+                 -self._vel[1] * 0.25 / (2 * LAT_MAX))
+        c = ((r[0] + r[2]) / 2, (r[1] + r[3]) / 2)
+        half = ((r[2] - r[0]) / 2, (r[3] - r[1]) / 2)
+        rest, best, axis = [0.0, 0.0], 0.2, None
+        for k in (0, 1):
+            d[k] -= c[k]                       # view centre, from the photo's
+            if k == 0 and full_wrap:
+                d[k] -= math.floor(d[k] + 0.5)
+            roam = max(half[k] - view[k], 0.0)
+            rest[k] = min(max(d[k], -roam), roam)
+            past = (abs(d[k] + fling[k]) - roam) / (2 * view[k])
+            if past > best:
+                best, axis = past, k
+        if axis is not None:      # the first photo just past the edge,
+            o = 1 - axis          # across from the view centre (over a gap)
+            s = 1.0 if d[axis] + fling[axis] > 0 else -1.0
+            p = [0.0, 0.0]
+            p[o] = c[o] + min(max(d[o], -half[o]), half[o])
+            texel = 1.0 / (self.vt.virt_h if axis else self.vt.virt_w)
+            for step in (1, 2, 4, 8, 16, 32, 64):
+                p[axis] = c[axis] + s * (half[axis] + step * texel)
+                if full_wrap:
+                    p[0] -= math.floor(p[0])
+                n = rect_at_uv(self.manifest, p[0], p[1],
+                               self.vt.virt_w, self.vt.virt_h)
+                if n is not None and n != self.snap:
+                    self.snap_to(n)
+                    return
+        self._vel = [0.0, 0.0]                 # no fling while snapped
+        if abs(rest[0] - d[0]) > 1e-6 or abs(rest[1] - d[1]) > 1e-6:
+            self.glide_to(c[0] + rest[0], c[1] + rest[1], self.height)
+
+    def update_snap(self):
+        """Zooming out until the snapped photo no longer fills the window
+        leaves snap mode (glides excepted: they pass through on the way
+        to a fit)."""
+        if (self.snap and self._anim is None
+                and self.height > 1.02 * self.fit_height(self.snap)):
+            self.snap = None
 
     def update_free_motion(self, dt):
         """Trackball inertia after a fling, and slow idle auto-rotate."""
@@ -673,6 +808,7 @@ class SphereViewer:
                     if settled or extra > 600:
                         break
             self.update_anim()
+            self.update_snap()
             self.update_flat()
             if self.args.frames is None:
                 self.refresh_hover()

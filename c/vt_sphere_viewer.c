@@ -7,8 +7,11 @@
     OUTSIDE of the sphere (globe); --inside views from the center.
     Hovering outlines the image under the pointer; clicking centers it,
     double-clicking zooms until it fills the window (flattening it)
-    (via <pyramid>_layout.json) with an eased glide. Trackball fling inertia and slow
-    idle auto-rotate included.
+    (via <pyramid>_layout.json) with an eased glide, and double-clicking
+    it again zooms back out. A photo zoomed to fill the window is snapped:
+    dragging far enough toward a neighbour glides on to that one, until
+    zooming out lets go. Trackball fling inertia and slow idle auto-rotate
+    included.
 
     Usage: vt_sphere_viewer [--pyramid DIR] [--inside] [--manifest F]
                             [--idle-delay S] [--idle-speed DEG/S]
@@ -121,6 +124,19 @@ typedef struct {
     float flat_w, flat_h;
     double last_click_t;
 
+    /* Snap mode: entered by fitting a photo to the window. Letting go of
+       a drag far enough past its edge glides on to the neighbour that
+       way; zooming out until the photo no longer fills the window leaves. */
+    int snap;                   /* snapped photo, -1 = not snapped */
+    float pre_fit_zoom;         /* height before the fit, to go back to */
+    /* the second click of a double lands mid-glide, so it acts on what
+       the first click hit, and on the snap as it stood before it */
+    int click_hit, click_snap;
+    float click_x, click_y, click_u, click_v;
+    bool click_ok;
+    bool hover_pinned;          /* outline the chosen photo, not the
+                                   pointer's, until the pointer moves */
+
     /* touch: two fingers pinch-zoom (one finger arrives as the mouse) */
     SDL_FingerID finger_id[2];
     float finger_x[2], finger_y[2];
@@ -170,6 +186,27 @@ static void page_notify_status(App *a, float fps, int resident)
 static void load_manifest(App *a)
 {
     vt_manifest_load(&a->manifest, a->pyramid, a->manifest_path);
+}
+
+/* photo i's rect in mosaic uv */
+static void photo_rect(App *a, int i, float r[4])
+{
+    const VtRect *m = &a->manifest.rects[i];
+    r[0] = (float)m->x / a->vt.virt_w;
+    r[1] = (float)m->y / a->vt.virt_h;
+    r[2] = (float)(m->x + m->w) / a->vt.virt_w;
+    r[3] = (float)(m->y + m->h) / a->vt.virt_h;
+}
+
+/* Outline the photo just clicked or snapped to. Moving the camera to it
+   leaves something else under a still pointer -- or under the spot a
+   finger last touched, which is all a touch screen remembers -- so the
+   outline stays put until the pointer actually moves. */
+static void pin_hover(App *a, int i)
+{
+    photo_rect(a, i, a->hover_uv);
+    a->has_hover = a->hover_pinned = true;
+    page_notify_photo(a, a->manifest.rects[i].name);
 }
 
 static bool cursor_uv(App *a, float cx, float cy, float *cu, float *cv);
@@ -416,39 +453,172 @@ static bool cursor_uv(App *a, float cx, float cy, float *cu, float *cv)
     return *cu >= 0.0f && *cu <= 1.0f && *cv >= 0.0f && *cv <= 1.0f;
 }
 
-/* ---------------------------------------------- click: center + zoom 50% */
+/* ------------------------------------------- click: center, fit, snap */
 
-static void click_center_zoom(App *a, float cx, float cy, bool fit)
+/* where the view is centred, in mosaic uv */
+static void view_uv(App *a, float *cu, float *cv)
 {
-    float cu, cv;
-    if (!cursor_uv(a, cx, cy, &cu, &cv))
-        return;
-    float rect[4];
-    int hit = vt_manifest_rect_at(&a->manifest, cu, cv, a->vt.virt_w,
-                                  a->vt.virt_h, rect);
-    bool have_rect = hit >= 0;
-    if (hit >= 0) {                      /* center the image, not the point */
-        cu = (rect[0] + rect[2]) * 0.5f;
-        cv = (rect[1] + rect[3]) * 0.5f;
-        snprintf(a->last_click, sizeof a->last_click, "%s",
-                 a->manifest.rects[hit].name);
-        page_notify_photo(a, a->last_click);
-    }
-    float zoom = a->inside ? a->fov : a->height;
-    float end_zoom = zoom;              /* single click: centre only */
-    if (fit && have_rect && !a->inside)
-        end_zoom = fit_height(a, rect);
+    *cu = 0.5f + a->az / (2 * a->lon_half);
+    *cv = 0.5f - a->el / (2 * LAT_MAX);
+}
+
+/* half the window's extent in mosaic uv, once flat */
+static void view_half_uv(App *a, float *hu, float *hv)
+{
+    int ww, wh;
+    SDL_GetWindowSize(a->w.win, &ww, &wh);
+    float tan_v = tanf(OUT_FOV * (float)M_PI / 360.0f);
+    float tan_h = tan_v * (float)ww / (wh > 0 ? wh : 1);
+    *hu = a->height * tan_h / a->flat_w;
+    *hv = a->height * tan_v / a->flat_h;
+}
+
+/* eased glide that centres (cu, cv) at the given zoom */
+static void glide_to(App *a, float cu, float cv, float end_zoom)
+{
     float az1 = (cu - 0.5f) * 2 * a->lon_half;
     float el1 = (0.5f - cv) * 2 * LAT_MAX;
     a->anim.az0 = a->az;
     a->anim.az1 = a->az + wrap_pi(az1 - a->az);
     a->anim.el0 = a->el;
     a->anim.el1 = el1;
-    a->anim.zoom0 = zoom;
+    a->anim.zoom0 = a->inside ? a->fov : a->height;
     a->anim.zoom1 = end_zoom;
     a->anim.t0 = now_seconds();
     a->anim.dur = 0.5;
     a->anim.active = true;
+    a->vel_az = a->vel_el = 0;
+}
+
+/* centre photo i and zoom until it fills the window: snap mode */
+static void snap_to(App *a, int i)
+{
+    float r[4];
+    photo_rect(a, i, r);
+    if (a->snap < 0)
+        a->pre_fit_zoom = a->height;
+    a->snap = i;
+    snprintf(a->last_click, sizeof a->last_click, "%s",
+             a->manifest.rects[i].name);
+    pin_hover(a, i);
+    glide_to(a, (r[0] + r[2]) * 0.5f, (r[1] + r[3]) * 0.5f,
+             fit_height(a, r));
+}
+
+/* Single click: centre the photo (or the point) at the same zoom; in snap
+   mode a different photo is snapped to instead. Double click: snap to the
+   photo, or, on the photo already snapped, zoom back to before the fit. */
+static void click_center_zoom(App *a, float cx, float cy, bool dbl)
+{
+    int prev_snap = a->click_snap;
+    if (dbl && (!a->click_ok || fabsf(cx - a->click_x) > 24
+                || fabsf(cy - a->click_y) > 24))
+        dbl = false;                     /* two clicks, not a double */
+    if (!dbl) {
+        a->click_ok = cursor_uv(a, cx, cy, &a->click_u, &a->click_v);
+        if (!a->click_ok)
+            return;
+        float r[4];
+        a->click_hit = vt_manifest_rect_at(&a->manifest, a->click_u,
+                                           a->click_v, a->vt.virt_w,
+                                           a->vt.virt_h, r);
+        a->click_snap = a->snap;
+        a->click_x = cx;
+        a->click_y = cy;
+    }
+    int hit = a->click_hit;
+    float zoom = a->inside ? a->fov : a->height;
+    if (hit < 0) {                       /* between photos: centre the point */
+        a->hover_pinned = false;
+        glide_to(a, a->click_u, a->click_v, zoom);
+        return;
+    }
+    if (!a->inside) {
+        if (dbl && hit == prev_snap && a->snap == hit) {
+            a->snap = -1;                /* back to before the fit */
+            pin_hover(a, hit);
+            float r[4];
+            photo_rect(a, hit, r);
+            glide_to(a, (r[0] + r[2]) * 0.5f, (r[1] + r[3]) * 0.5f,
+                     a->pre_fit_zoom);
+            return;
+        }
+        if (dbl || (a->snap >= 0 && hit != a->snap)) {
+            snap_to(a, hit);
+            return;
+        }
+    }
+    snprintf(a->last_click, sizeof a->last_click, "%s",
+             a->manifest.rects[hit].name);
+    pin_hover(a, hit);
+    float r[4];
+    photo_rect(a, hit, r);                /* center the image, not the point */
+    glide_to(a, (r[0] + r[2]) * 0.5f, (r[1] + r[3]) * 0.5f, zoom);
+}
+
+/* Snap mode, letting go of a drag: past the snapped photo's edge by a
+   fifth of the window -- a flick's momentum counts -- glides on to the
+   neighbour that way. Short of that it springs back so the window stays
+   on the photo (or centred on it, along a side it does not fill). */
+static void snap_release(App *a)
+{
+    float r[4], view[2], d[2], c[2], half[2];
+    photo_rect(a, a->snap, r);
+    view_half_uv(a, &view[0], &view[1]);
+    view_uv(a, &d[0], &d[1]);
+    bool full_wrap = a->lon_half >= (float)M_PI - 1e-6f;
+    float fling[2] = {a->vel_az * 0.25f / (2 * a->lon_half),
+                      -a->vel_el * 0.25f / (2 * LAT_MAX)};
+    float rest[2], best = 0.2f;
+    int axis = -1;
+    for (int k = 0; k < 2; k++) {
+        c[k] = (r[k] + r[k + 2]) * 0.5f;
+        half[k] = (r[k + 2] - r[k]) * 0.5f;
+        d[k] -= c[k];                     /* view centre, from the photo's */
+        if (k == 0 && full_wrap)
+            d[k] -= floorf(d[k] + 0.5f);
+        float roam = fmaxf(half[k] - view[k], 0.0f);
+        rest[k] = clampf(d[k], -roam, roam);
+        float past = (fabsf(d[k] + fling[k]) - roam) / (2 * view[k]);
+        if (past > best) {
+            best = past;
+            axis = k;
+        }
+    }
+    if (axis >= 0) {          /* the first photo just past the edge, across
+                                 from the view centre (over any gap) */
+        int o = 1 - axis;
+        float s = d[axis] + fling[axis] > 0 ? 1.0f : -1.0f;
+        float p[2], unused[4];
+        p[o] = c[o] + clampf(d[o], -half[o], half[o]);
+        float texel = 1.0f / (axis ? a->vt.virt_h : a->vt.virt_w);
+        for (float step = 1; step <= 64; step *= 2) {
+            p[axis] = c[axis] + s * (half[axis] + step * texel);
+            if (full_wrap)
+                p[0] -= floorf(p[0]);
+            int n = vt_manifest_rect_at(&a->manifest, p[0], p[1],
+                                        a->vt.virt_w, a->vt.virt_h, unused);
+            if (n >= 0 && n != a->snap) {
+                snap_to(a, n);
+                return;
+            }
+        }
+    }
+    a->vel_az = a->vel_el = 0;            /* no fling while snapped */
+    if (fabsf(rest[0] - d[0]) > 1e-6f || fabsf(rest[1] - d[1]) > 1e-6f)
+        glide_to(a, c[0] + rest[0], c[1] + rest[1], a->height);
+}
+
+/* zooming out until the snapped photo no longer fills the window leaves
+   snap mode (glides excepted: they pass through on the way to a fit) */
+static void update_snap(App *a)
+{
+    if (a->snap < 0 || a->anim.active)
+        return;
+    float r[4];
+    photo_rect(a, a->snap, r);
+    if (a->height > 1.02f * fit_height(a, r))
+        a->snap = -1;
 }
 
 static void update_anim(App *a)
@@ -497,7 +667,8 @@ static void toggle_freeze(App *a)
    sits under a stationary pointer changes without any mouse event */
 static void refresh_hover(App *a)
 {
-    if (!a->manifest.rects || SDL_GetMouseFocus() != a->w.win)
+    if (!a->manifest.rects || a->hover_pinned
+            || SDL_GetMouseFocus() != a->w.win)
         return;
     int mx, my;
     SDL_GetMouseState(&mx, &my);
@@ -619,11 +790,26 @@ static void build_band_mesh(App *a)
 
 /* ---------------------------------------------------------------- input */
 
-static float drag_rate(App *a)
+/* Camera turn per pixel of drag, in radians, so that what sits at the
+   view centre follows the pointer 1:1. A pixel there spans 2 h tan(fov/2)
+   / window-height of the surface, the camera being h away (outside) or
+   that spans 2 tan(fov/2) / window-height radians of view (inside).
+   Turning in azimuth moves the globe by cos(el) of that at the centre,
+   but the flattened plane by all of it, so blend as the surface flattens. */
+static void drag_rates(App *a, float *r_az, float *r_el)
 {
-    if (a->inside)
-        return 0.0025f * a->fov / 70.0f;
-    return 0.005f * clampf(a->height / RADIUS, 0.03f, 1.5f);
+    int ww, wh;
+    SDL_GetWindowSize(a->w.win, &ww, &wh);
+    float fov = a->inside ? a->fov : OUT_FOV;
+    float px = 2.0f * tanf(fov * (float)M_PI / 360.0f) / (wh > 0 ? wh : 1);
+    float c = fmaxf(cosf(a->el), 0.2f);
+    if (a->inside) {
+        *r_el = px;
+    } else {
+        *r_el = px * a->height / RADIUS;
+        c += (1.0f - c) * a->flat;
+    }
+    *r_az = *r_el / c;
 }
 
 static float finger_spread(App *a)
@@ -706,6 +892,7 @@ static void handle_events(App *a, bool *running)
             }
             else if (ev.key.keysym.sym == SDLK_r) {
                 a->anim.active = false;
+                a->snap = -1;
                 a->vel_az = a->vel_el = 0;
                 a->az = a->el = 0;
                 a->fov = 75.0f;
@@ -743,27 +930,33 @@ static void handle_events(App *a, bool *running)
                 {
                     double now = now_seconds();
                     bool dbl = now - a->last_click_t < 0.35;
-                    a->last_click_t = now;
+                    a->last_click_t = dbl ? 0 : now;   /* no triple */
                     click_center_zoom(a, ev.button.x, ev.button.y, dbl);
                 }
-            } else if (a->move_t == 0
-                       || now_seconds() - a->move_t > 0.12) {
-                a->vel_az = a->vel_el = 0;   /* held still: no fling */
+            } else {
+                if (a->move_t == 0 || now_seconds() - a->move_t > 0.12)
+                    a->vel_az = a->vel_el = 0;   /* held still: no fling */
+                if (a->snap >= 0 && ev.button.button == SDL_BUTTON_LEFT)
+                    snap_release(a);
             }
             a->dragging = false;
             a->has_press = false;
             break;
         }
         case SDL_MOUSEMOTION:
+            if (a->snap < 0 || !a->dragging)  /* a snapped drag keeps the
+                                                 snapped photo outlined */
+                a->hover_pinned = false;
             if (!a->dragging)
                 update_hover(a, ev.motion.x, ev.motion.y);
             if (a->dragging) {
                 double now = now_seconds();
                 a->last_input = now;
                 a->user_moved = true;
-                float rate = drag_rate(a);
-                float daz = -(ev.motion.x - a->drag_x) * rate;
-                float del = (ev.motion.y - a->drag_y) * rate;
+                float r_az, r_el;
+                drag_rates(a, &r_az, &r_el);
+                float daz = -(ev.motion.x - a->drag_x) * r_az;
+                float del = (ev.motion.y - a->drag_y) * r_el;
                 a->drag_x = ev.motion.x;
                 a->drag_y = ev.motion.y;
                 a->az = wrap_pi(a->az + daz);
@@ -844,6 +1037,7 @@ static void frame(void *arg)
         update_free_motion(a, dt);
     }
     update_anim(a);
+    update_snap(a);
     update_flat(a);
     if (a->frames < 0)
         refresh_hover(a);
@@ -920,6 +1114,7 @@ int main(int argc, char **argv)
     a->idle_speed = 3.0f;
     a->idle_dir = 1.0f;
     a->hi_style = 2;
+    a->snap = a->click_snap = a->click_hit = -1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--pyramid") && i + 1 < argc)
             a->pyramid = argv[++i];

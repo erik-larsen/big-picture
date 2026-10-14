@@ -171,7 +171,7 @@ cd ../big-picture-tiles && git checkout --orphan new && git add -A \
 | scroll | zoom |
 | hover | outline the mosaic image under the pointer |
 | click | centre the view on that image, eased |
-| double click | zoom until that image fills the window (sphere viewer) |
+| double click | zoom until that image fills the window, or back out again (sphere viewer) |
 | **H** | cycle hover-highlight style |
 | **F** | freeze / unfreeze streaming |
 | **L** | LOD debug overlay |
@@ -183,6 +183,14 @@ looking at, so by the time a picture fills the window it is flat and in its
 true aspect ratio — the equirectangular squeeze undone along the way. Zoom back out and it eases
 back into a sphere. It is one continuous morph, not a mode switch; double
 click drives it straight to the flat end, landing square on that photo.
+
+A photo zoomed to fill the window is **snapped**. Drags still track the
+pointer 1:1, but letting go a fifth of a window past the photo's edge (or
+flicking toward it) glides on to the neighbour that way and fits it in
+turn; anything less springs back. Clicking a neighbour snaps to it too, and
+double clicking the snapped photo returns to the zoom you double clicked
+from. Zoom out until the photo no longer fills the window and the globe is
+free again.
 
 The sphere viewer opens in an attract spin — a slow auto-rotate that stops
 for good the moment you touch the view, and comes back on **R**
