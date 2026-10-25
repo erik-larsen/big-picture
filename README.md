@@ -5,28 +5,30 @@ single 4096² texture. A MegaTexture / LibVT-style virtual texturing renderer,
 in Python (OpenGL 3.3) and C (SDL2 + OpenGL ES 2.0) — and the C version
 compiled to WebAssembly, so it runs in a browser too.
 
-**[Try the globe in your browser →](https://erik-larsen.github.io/big-picture/)**
-
 ![Photo globe](pics/screens/photo-globe.jpg)
+
 *462 mountain photographs mosaicked into a single 1.8 gigapixel image and
 wrapped onto a globe, in the browser: portraits toward the poles, landscapes
 along the equator. Just 122 of the atlas's 225 pages were resident when this
 frame was drawn — [try it live](https://erik-larsen.github.io/big-picture/),
 or reproduce it with the commands below.*
 
-![Flat viewer](pics/screens/flat-viewer.png)
+<p align="center">
+  <img src="pics/screens/flat-viewer.png" alt="Flat viewer">
+</p>
+
 *The 16384² synthetic test image, orbited at 1155 fps. The title bar tracks
 resident pages, pending loads, and tiles streamed.*
 
 ## Build
 
-Python viewers — that's all you need to get running:
+Python viewers:
 
 ```sh
 pip install -r requirements.txt
 ```
 
-The C viewers are optional, and need SDL2 plus the ANGLE GLES2 libraries from
+C viewers are optional, and need SDL2 plus the ANGLE GLES2 libraries from
 [opengl-for-mac](https://github.com/erik-larsen/opengl-for-mac):
 
 ```sh
@@ -66,6 +68,7 @@ without an API key or your own pictures:
 ```
 
 ![Synthetic card globe](pics/screens/photo-globe-cards.jpg)
+
 *The same globe built from 300 generated cards instead of photographs.*
 
 Each card is labelled with its folder path, so the globe doubles as a
@@ -160,6 +163,7 @@ cd ../big-picture-tiles && git checkout --orphan new && git add -A \
 ```
 
 ![Sphere viewer](pics/screens/sphere-viewer.png)
+
 *The same virtual-texturing core on a sphere band — only the geometry differs.*
 
 ## Controls
@@ -202,6 +206,7 @@ page the frozen view doesn't need, and draws the freeze-moment frustum. Fly
 away and the algorithm is laid bare.
 
 ![Frozen LOD state](pics/screens/frozen-lod.jpg)
+
 *After **F** close-in, then pulling back: only the 49 of 225 pages the frozen
 view needed survive, so its footprint stays sharp while everything else falls
 back to the coarsest resident ancestor.*
