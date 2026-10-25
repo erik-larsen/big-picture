@@ -17,8 +17,7 @@ or reproduce it with the commands below.*
   <img src="pics/screens/flat-viewer.png" alt="Flat viewer">
 </p>
 
-*The 16384² synthetic test image, orbited at 1155 fps. The title bar tracks
-resident pages, pending loads, and tiles streamed.*
+*The 16384² synthetic test image, orbited at 1155 fps. The title bar tracks resident pages, pending loads, and tiles streamed.*
 
 ## Build
 
