@@ -1,0 +1,161 @@
+# Photo credits
+
+235 photographs from Pexels, fetched with `fetch_photos.py`.
+
+Attribution is not required by the Pexels licence, but is offered here with thanks — and their API terms ask for it.
+
+- [Adem Erkoç](https://www.pexels.com/@erkocphoto) — 1 photo
+- [Adrien Olichon](https://www.pexels.com/@adrien-olichon-1257089) — 1 photo
+- [Ahmed Sadeq](https://www.pexels.com/@ahmed-sadeq-453709971) — 1 photo
+- [Ahmet Mert](https://www.pexels.com/@ahmetmert) — 18 photos
+- [Ahmet Yüksek ✪](https://www.pexels.com/@ahmetyuksek) — 1 photo
+- [Aibek Skakov](https://www.pexels.com/@aibek-skakov-418917601) — 1 photo
+- [Akari Lu](https://www.pexels.com/@akari-lu-872649) — 1 photo
+- [Alan Kabeš](https://www.pexels.com/@alan-kabes-364775148) — 1 photo
+- [Alena Beliaeva](https://www.pexels.com/@alena-beliaeva-78160053) — 1 photo
+- [Alexander Mass](https://www.pexels.com/@rebornfilmes) — 1 photo
+- [Alexandr Nikulin](https://www.pexels.com/@niksenges) — 1 photo
+- [Aleš Toman](https://www.pexels.com/@ales-toman-789265684) — 1 photo
+- [Amir Shrestha](https://www.pexels.com/@amirshresthaa) — 1 photo
+- [Anaïs Ginguené](https://www.pexels.com/@anais-ginguene-485485411) — 1 photo
+- [Andreas Ebner](https://www.pexels.com/@andreasebnerfotografie) — 7 photos
+- [Anna Photosmaslom](https://www.pexels.com/@anna-photosmaslom-2162548370) — 1 photo
+- [Anuj Yadav](https://www.pexels.com/@anuj-yadav-34803963) — 1 photo
+- [Anurag Chandra](https://www.pexels.com/@anurag-chandra-74121311) — 1 photo
+- [Arian Hoti](https://www.pexels.com/@arian-hoti-346077292) — 1 photo
+- [Arish Ali](https://www.pexels.com/@thearishali) — 1 photo
+- [Ariyan](https://www.pexels.com/@ariyan) — 1 photo
+- [Artem Korolev](https://www.pexels.com/@artem-korolev-2159253660) — 3 photos
+- [Artem Makarov](https://www.pexels.com/@artem-makarov-289670876) — 2 photos
+- [Arti Kh](https://www.pexels.com/@arti) — 1 photo
+- [Artur Stec](https://www.pexels.com/@artur-stec-26039050) — 2 photos
+- [Artyom Kanshin](https://www.pexels.com/@artyom-kanshin-37400998) — 1 photo
+- [Ashok Sharma](https://www.pexels.com/@ashok-sharma-78565317) — 1 photo
+- [Ashutosh](https://www.pexels.com/@ashutosh-251110270) — 1 photo
+- [Athena Sandrini](https://www.pexels.com/@athena) — 1 photo
+- [Audrey Bory](https://www.pexels.com/@audstories) — 1 photo
+- [Ave Calvar Martinez](https://www.pexels.com/@shotbyrain) — 7 photos
+- [Axel Sandoval](https://www.pexels.com/@axlsm) — 1 photo
+- [Beard Kid](https://www.pexels.com/@beard-kid-401529963) — 1 photo
+- [Beyza Eren](https://www.pexels.com/@tournesolvg) — 1 photo
+- [BiZay Sunuwar](https://www.pexels.com/@sbizay) — 1 photo
+- [Ch  Jawad](https://www.pexels.com/@ch-jawad-224803663) — 1 photo
+- [Chris](https://www.pexels.com/@chriszwettler) — 4 photos
+- [Christopher Politano](https://www.pexels.com/@christopher-politano-978995) — 3 photos
+- [Clement Couturier](https://www.pexels.com/@clement-couturier-546640561) — 1 photo
+- [Cătălin Todosia](https://www.pexels.com/@catalin-todosia-876894548) — 3 photos
+- [Damien Dufour](https://www.pexels.com/@damiendufourartiste) — 1 photo
+- [Daniel J. Schwarz](https://www.pexels.com/@danieljschwarz) — 2 photos
+- [Daniel Torobekov](https://www.pexels.com/@alohaphotostudio) — 3 photos
+- [Darya Grey_Owl](https://www.pexels.com/@darya-grey_owl-132130036) — 2 photos
+- [Davide Comunian](https://www.pexels.com/@tuttosfocato) — 1 photo
+- [Dawid Tkocz](https://www.pexels.com/@dawidtkocz) — 1 photo
+- [Deekshith Rao](https://www.pexels.com/@deekshith-rao-2148754867) — 1 photo
+- [Deivis Sandoval](https://www.pexels.com/@untal3d) — 1 photo
+- [Denis Poltoradnev](https://www.pexels.com/@denis-poltoradnev-3008003) — 1 photo
+- [Dhruv   Jangid](https://www.pexels.com/@dhruv-jangid-2945224) — 3 photos
+- [Dinara Guseinova](https://www.pexels.com/@dnrgs) — 1 photo
+- [Dmitry Alexandrovich](https://www.pexels.com/@dmitry93) — 1 photo
+- [Duran  Ekiz](https://www.pexels.com/@duran-ekiz-177082092) — 1 photo
+- [Emre Can Acer](https://www.pexels.com/@emrecan) — 1 photo
+- [Faizan Meer](https://www.pexels.com/@faizanmeer) — 1 photo
+- [Farhaan Mushtaq  Parimoo](https://www.pexels.com/@parimoofarhaan) — 1 photo
+- [Francesco Ungaro](https://www.pexels.com/@francesco-ungaro) — 7 photos
+- [Freitas Junior](https://www.pexels.com/@frjuniorx) — 1 photo
+- [GERXRD 25](https://www.pexels.com/@gerxrd-25-1469882273) — 1 photo
+- [Gabin Cobret](https://www.pexels.com/@gabin-cobret-430175667) — 2 photos
+- [Gabriel Ramos](https://www.pexels.com/@gabrieluizramos) — 1 photo
+- [Gagaz Adam](https://www.pexels.com/@ggzadam) — 1 photo
+- [Giona Mason](https://www.pexels.com/@giona-mason-1751396) — 1 photo
+- [György Lakatos](https://www.pexels.com/@gyorgy-lakatos-113005281) — 3 photos
+- [Harsh  Kukadiya](https://www.pexels.com/@harsh-kukadiya-244412142) — 1 photo
+- [Hrushik Perumalla](https://www.pexels.com/@hrushikperumalla) — 1 photo
+- [Ilia Bronskiy](https://www.pexels.com/@ilia-bronskiy-1137858493) — 1 photo
+- [Image Hunter](https://www.pexels.com/@image-hunter-281453274) — 1 photo
+- [Isaac Mitchell](https://www.pexels.com/@isaac-mitchell-278678383) — 1 photo
+- [Ivan Larin](https://www.pexels.com/@ivan-larin-77752766) — 1 photo
+- [Joel Gundi](https://www.pexels.com/@joegun) — 2 photos
+- [John Arellano](https://www.pexels.com/@imanash593) — 1 photo
+- [Juan Carlos  Fernández Alemán](https://www.pexels.com/@gojuanca) — 1 photo
+- [Juan TM](https://www.pexels.com/@juantrevilla) — 1 photo
+- [Juliano  Ferreira](https://www.pexels.com/@juliano-ferreira-102048601) — 1 photo
+- [Jumbo Jin](https://www.pexels.com/@jumbo-jin-102492866) — 1 photo
+- [Just a Dream Pictures](https://www.pexels.com/@just-a-dream-pictures-393935092) — 1 photo
+- [Justyna Sieczka](https://www.pexels.com/@justyna-sieczka-2161487384) — 1 photo
+- [K](https://www.pexels.com/@kelly) — 1 photo
+- [Kate 🇺🇦 Strilchuk](https://www.pexels.com/@kate-strilchuk-245702164) — 1 photo
+- [Konstantin Finyuk](https://www.pexels.com/@konstantin-finyuk-94536403) — 3 photos
+- [Kris Møklebust](https://www.pexels.com/@moklebust) — 1 photo
+- [Kseniia Bezz](https://www.pexels.com/@bezzaponnaya) — 2 photos
+- [Laura Chouette](https://www.pexels.com/@laurachouette) — 2 photos
+- [Leonardo Barucci](https://www.pexels.com/@thebaaru) — 1 photo
+- [Liana Tril'](https://www.pexels.com/@liana-tril-86841229) — 1 photo
+- [Linken Van Zyl](https://www.pexels.com/@linken-van-zyl-263454378) — 1 photo
+- [Lorenzo Alessio Messina](https://www.pexels.com/@lorenzomessinaph) — 6 photos
+- [Loverice  Lah](https://www.pexels.com/@emmypaw) — 1 photo
+- [M.Emin  BİLİR](https://www.pexels.com/@travelerchitect) — 1 photo
+- [Marcin Jozwiak](https://www.pexels.com/@marcin-jozwiak-199600) — 1 photo
+- [Marek Piwnicki](https://www.pexels.com/@marek-piwnicki-3907296) — 1 photo
+- [Mario Grijalva](https://www.pexels.com/@mario-grijalva-97608614) — 1 photo
+- [Marius Mann](https://www.pexels.com/@marius-mann-772581) — 1 photo
+- [Martin Ziomek](https://www.pexels.com/@martin-ziomek-2773852) — 1 photo
+- [Maryia Plashchynskaya](https://www.pexels.com/@maryiaplashchynskaya) — 3 photos
+- [Matteo Sarri](https://www.pexels.com/@matteo-sarri-2152532088) — 1 photo
+- [Maël  BALLAND](https://www.pexels.com/@toulouse) — 1 photo
+- [Meet Patel](https://www.pexels.com/@meet-patel-774848233) — 1 photo
+- [Meike](https://www.pexels.com/@meike-664865296) — 1 photo
+- [Micaela Alejandro](https://www.pexels.com/@micklejandro) — 1 photo
+- [Michael Kanivetsky](https://www.pexels.com/@mkan1vetsky) — 1 photo
+- [Miqueas Claus](https://www.pexels.com/@miqueas-claus-107016342) — 1 photo
+- [Miraç İnce](https://www.pexels.com/@mirac-i-nce-1062249912) — 1 photo
+- [Mustafa  Fatemi](https://www.pexels.com/@solaticace) — 1 photo
+- [Márton Novák](https://www.pexels.com/@marton-novak-81427533) — 1 photo
+- [Neil Bates](https://www.pexels.com/@neil-bates-10561) — 1 photo
+- [Nicholas Ang](https://www.pexels.com/@nicholas-ang-43043322) — 1 photo
+- [Nicolas](https://www.pexels.com/@nicolas) — 1 photo
+- [Nikita Krasnov](https://www.pexels.com/@nikita-krasnov-5999644) — 1 photo
+- [Nikolay Danilov](https://www.pexels.com/@danilovkzn) — 1 photo
+- [OMID VISUALS](https://www.pexels.com/@omid-visuals-2565301) — 1 photo
+- [Odin Pili](https://www.pexels.com/@odin-pili-208940075) — 1 photo
+- [Olga Shenderova](https://www.pexels.com/@olga-shenderova-67505314) — 1 photo
+- [Ollie Craig](https://www.pexels.com/@olliecraig1) — 1 photo
+- [Oskar Gross](https://www.pexels.com/@oskar-gross-1074333632) — 1 photo
+- [Oye Yogi](https://www.pexels.com/@oyeyogi) — 1 photo
+- [Parveen Khantwal](https://www.pexels.com/@parveen-khantwal-468190405) — 1 photo
+- [Peter Fazekas](https://www.pexels.com/@peterfazekas) — 1 photo
+- [Radis B](https://www.pexels.com/@radis) — 2 photos
+- [Rebaz Geo](https://www.pexels.com/@rebaz-geo-1735378) — 1 photo
+- [Riedelmax .](https://www.pexels.com/@riedelmax) — 1 photo
+- [Romain](https://www.pexels.com/@romain-2149933262) — 1 photo
+- [Romain Malatier](https://www.pexels.com/@d1autrepointdevue) — 1 photo
+- [Ryan Klaus](https://www.pexels.com/@ryank) — 2 photos
+- [Sabina Kallari](https://www.pexels.com/@sabinakallari) — 2 photos
+- [Sandro Tedeschini](https://www.pexels.com/@sandro-tedeschini-694018589) — 1 photo
+- [Sawa Ooowl](https://www.pexels.com/@ooowl) — 1 photo
+- [Sem Steenbergen](https://www.pexels.com/@ssteenbergenn) — 1 photo
+- [Shojol Islam](https://www.pexels.com/@shojol) — 2 photos
+- [Siarhei Nester](https://www.pexels.com/@siarhei-nester-318033361) — 1 photo
+- [Simona](https://www.pexels.com/@simona-522599730) — 1 photo
+- [Stijn Dijkstra](https://www.pexels.com/@stijn-dijkstra-1306815) — 1 photo
+- [Syed Qaarif Andrabi](https://www.pexels.com/@qaarif) — 1 photo
+- [Taras Chuiko](https://www.pexels.com/@taraschuiko) — 2 photos
+- [Tembela Bohle](https://www.pexels.com/@bohlemedia) — 1 photo
+- [Valentin Ilas](https://www.pexels.com/@valentin-ilas-2154050328) — 1 photo
+- [Veronika Kravchenko](https://www.pexels.com/@veronika-kravchenko-2155849414) — 1 photo
+- [Vitor Lopes](https://www.pexels.com/@lawlesscapture) — 1 photo
+- [Vladislav Likhomanov](https://www.pexels.com/@leehee) — 1 photo
+- [Yakup  Polat](https://www.pexels.com/@yakup-polat-420882786) — 1 photo
+- [Yaroslav Shuraev](https://www.pexels.com/@yaroslav-shuraev) — 1 photo
+- [Zak Mogel](https://www.pexels.com/@zak-mogel-2158251013) — 1 photo
+- [Zaur Takhgiriev](https://www.pexels.com/@zkadoshi) — 1 photo
+- [apson_magar](https://www.pexels.com/@apson_magar-3546515) — 1 photo
+- [cottonbro studio](https://www.pexels.com/@cottonbro) — 3 photos
+- [eberhard grossgasteiger](https://www.pexels.com/@eberhardgross) — 3 photos
+- [going  to the river](https://www.pexels.com/@going-to-the-river-1386266882) — 3 photos
+- [kushaal narotham](https://www.pexels.com/@kushaal-narotham-957760) — 1 photo
+- [merwak. raw](https://www.pexels.com/@merwak-raw-399619273) — 2 photos
+- [subash click](https://www.pexels.com/@subash-click-551797149) — 1 photo
+- [urtimud.89](https://www.pexels.com/@urtimud-89-76108288) — 2 photos
+- [Игорь Крыканов](https://www.pexels.com/@244411608) — 1 photo
+- [Никита  Шелайкин](https://www.pexels.com/@1093389518) — 1 photo
+- [Павел Скачков](https://www.pexels.com/@79785135) — 1 photo
