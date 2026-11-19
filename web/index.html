@@ -45,7 +45,7 @@
 
   #title {
     top: var(--gutter); left: var(--gutter); padding: 8px 12px;
-    max-width: min(440px, calc(100vw - 32px - 86px));
+    max-width: min(440px, calc(100vw - 32px - 128px));
   }
   #title h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
   #title p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
@@ -57,6 +57,9 @@
   }
   #buttons a:hover, #buttons button:hover { color: var(--link-hover); text-decoration: none; }
   #buttons svg { width: 18px; height: 18px; fill: currentColor; }
+  /* the button shows where it goes: a map on the globe, a globe on the map */
+  #view-toggle[aria-pressed="true"] .to-map,
+  #view-toggle[aria-pressed="false"] .to-globe { display: none; }
 
   #help {
     top: calc(var(--gutter) + 44px); right: var(--gutter);
@@ -131,6 +134,10 @@
 </header>
 
 <nav id="buttons" class="hud">
+  <button id="view-toggle" class="panel" aria-pressed="false" title="Flat map (P)" aria-label="Show as a flat map">
+    <svg class="to-map" viewBox="0 0 16 16" aria-hidden="true"><path d="M1 3.5 5.5 2l5 1.5L15 2v10.5L10.5 14l-5-1.5L1 14V3.5zm1.5 1.1v7.3l2.5-.8V3.8l-2.5.8zm4 6.5 3 .9V4.9l-3-.9v7.1zm4.5.8 2.5-.8V4.1l-2.5.8v7.1z"/></svg>
+    <svg class="to-globe" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1a7 7 0 1 1 0 14A7 7 0 0 1 8 1zm-1.6 1.7A5.5 5.5 0 0 0 2.6 7.2h2.3c.1-1.7.6-3.3 1.5-4.5zm3.2 0c.9 1.2 1.4 2.8 1.5 4.5h2.3a5.5 5.5 0 0 0-3.8-4.5zM8 2.6c-.9.9-1.5 2.6-1.6 4.6h3.2C9.5 5.2 8.9 3.5 8 2.6zM2.6 8.8a5.5 5.5 0 0 0 3.8 4.5c-.9-1.2-1.4-2.8-1.5-4.5H2.6zm3.8 0c.1 2 .7 3.7 1.6 4.6.9-.9 1.5-2.6 1.6-4.6H6.4zm4.7 0c-.1 1.7-.6 3.3-1.5 4.5a5.5 5.5 0 0 0 3.8-4.5h-2.3z"/></svg>
+  </button>
   <button id="help-toggle" class="panel" aria-expanded="false" aria-controls="help" title="Controls">?</button>
   <a class="panel" href="https://github.com/erik-larsen/big-picture" title="Source on GitHub" aria-label="Source on GitHub">
     <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
@@ -149,6 +156,7 @@
     <tr class="touch"><td>tap</td><td>centre that photo</td></tr>
     <tr class="touch"><td>double tap</td><td>zoom until it fills the screen, or back out</td></tr>
     <tr class="touch"><td>swipe past its edge</td><td>on to the next photo</td></tr>
+    <tr><td><svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" aria-hidden="true"><path d="M1 3.5 5.5 2l5 1.5L15 2v10.5L10.5 14l-5-1.5L1 14V3.5z"/></svg><span class="mouse"> or <kbd>P</kbd></span></td><td>unroll the globe into a flat map, or back</td></tr>
     <tr class="mouse"><td><kbd>H</kbd></td><td>cycle the outline style</td></tr>
     <tr class="mouse"><td><kbd>L</kbd></td><td>show levels of detail</td></tr>
     <tr class="mouse"><td><kbd>F</kbd></td><td>freeze streaming, then fly away</td></tr>
@@ -181,6 +189,11 @@ function fail(msg) {
   $('loading').classList.remove('done');
   $('loading-text').textContent = msg;
 }
+
+$('view-toggle').addEventListener('click', () => {
+  if (Module._vt_toggle_planar) Module._vt_toggle_planar();
+  $('canvas').focus();
+});
 
 $('help-toggle').addEventListener('click', () => {
   const open = $('help').classList.toggle('open');
@@ -243,6 +256,12 @@ var Module = {
     pexels.textContent = 'Pexels';
     $('credit').replaceChildren(photo, ' by ', who, ' on ', pexels);
     $('credit').classList.add('show');
+  },
+  vtPlanar(on) {
+    const b = $('view-toggle');
+    b.setAttribute('aria-pressed', !!on);
+    b.title = on ? 'Globe (P)' : 'Flat map (P)';
+    b.setAttribute('aria-label', on ? 'Show as a globe' : 'Show as a flat map');
   },
   vtStatus(fps, resident, slots, pending, loaded) {
     const n = x => x.toLocaleString();

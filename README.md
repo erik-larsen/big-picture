@@ -175,6 +175,7 @@ cd ../big-picture-tiles && git checkout --orphan new && git add -A \
 | hover | outline the mosaic image under the pointer |
 | click | centre the view on that image, eased |
 | double click | zoom until that image fills the window, or back out again (sphere viewer) |
+| **P**, map/globe button | unroll the globe into a flat map, or roll it back up (sphere viewer) |
 | **H** | cycle hover-highlight style |
 | **F** | freeze / unfreeze streaming |
 | **L** | LOD debug overlay |
@@ -194,6 +195,16 @@ turn; anything less springs back. Clicking a neighbour snaps to it too, and
 double clicking the snapped photo returns to the zoom you double clicked
 from. Zoom in or out and the snap lets go: out, the globe is free again;
 in, you can pan around the photo without being pulled to its neighbours.
+
+**P** (the map/globe button in the browser) morphs the whole globe into a
+flat map of the mosaic and back. Unlike the zoom de-warp, every vertex takes
+part: the surface passes through a sphere that grows as it flattens, tangent
+at the view centre and true to arc length, so the map uncurls off the globe
+rather than its back half sweeping through the front. It splits along the
+mosaic's own left and right edges, so on the map panning stops at those edges
+instead of wrapping round. From a view of the whole globe the camera glides
+out to the whole map as it unrolls (and back); zoomed in close, it stays put
+and only what lies beyond the window changes shape. `--planar` opens on the map.
 
 The sphere viewer opens in an attract spin — a slow auto-rotate that stops
 for good the moment you touch the view, and comes back on **R**

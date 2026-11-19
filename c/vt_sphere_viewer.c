@@ -11,9 +11,10 @@
     it again zooms back out. A photo zoomed to fill the window is snapped:
     dragging far enough toward a neighbour glides on to that one, until
     zooming in or out lets go. Trackball fling inertia and slow idle auto-rotate
-    included.
+    included. P (or the page's button) morphs between the globe and the
+    whole mosaic unrolled into a flat map.
 
-    Usage: vt_sphere_viewer [--pyramid DIR] [--inside] [--manifest F]
+    Usage: vt_sphere_viewer [--pyramid DIR] [--inside] [--planar] [--manifest F]
                             [--idle-delay S] [--idle-speed DEG/S]
                             [--frames N] [--screenshot OUT.png]
                             [--end-fov F] [--end-height H] [--click-test]
@@ -39,12 +40,22 @@
    Only a patch around the view centre flattens (full within uFlatNear
    radians, none beyond uFlatFar), sized to overhang the screen: blending
    the whole band would drag the far side forward, curling it around the
-   limb into view. */
+   limb into view.
+
+   Separately, uPlanar unrolls the whole band into a flat map (the planar
+   view). The same tangent plane is the far end, but here every vertex
+   takes part, and the path there is a sphere that grows as it flattens:
+   tangent at the focus, radius uRadius / (1 - uPlanar), and laid out
+   arc-length true, so the map uncurls from the globe instead of its back
+   half sweeping straight through the front. It splits along the mosaic's
+   own edges (u = 0 and 1), which the mesh already has, never wrapping
+   the short way: a seam there would smear a row of triangles across the
+   whole map. */
 static const char *SPHERE_VS_SRC =
     "attribute vec3 aPos;\n"
     "attribute vec2 aUV;\n"
     "uniform mat4 uMVP;\n"
-    "uniform float uRadius, uLonHalf, uLatMax, uZSign, uFlat;\n"
+    "uniform float uRadius, uLonHalf, uLatMax, uZSign, uFlat, uPlanar;\n"
     "uniform float uFlatNear, uFlatFar;\n"
     "uniform vec2 uFocus;\n"          /* lon, lat of the anchor */
     "uniform vec2 uFlatDim;\n"        /* full mosaic size once flat */
@@ -55,7 +66,7 @@ static const char *SPHERE_VS_SRC =
     "  float lon = (aUV.x - 0.5) * 2.0 * uLonHalf;\n"
     "  vec3 p = uRadius * vec3(cos(lat)*sin(lon), sin(lat),\n"
     "                          uZSign*cos(lat)*cos(lon));\n"
-    "  if (uFlat > 0.0) {\n"
+    "  if (uFlat > 0.0 || uPlanar > 0.0) {\n"
     "    float lc = uFocus.x, tc = uFocus.y;\n"
     "    vec3 n     = vec3(cos(tc)*sin(lc), sin(tc), uZSign*cos(tc)*cos(lc));\n"
     "    vec3 east  = vec3(cos(lc), 0.0, -uZSign*sin(lc));\n"
@@ -63,11 +74,26 @@ static const char *SPHERE_VS_SRC =
     "    float uc = 0.5 + lc/(2.0*uLonHalf);\n"
     "    float vc = 0.5 - tc/(2.0*uLatMax);\n"
     "    float du = aUV.x - uc;\n"
-    "    if (uLonHalf > 3.1415) du -= floor(du + 0.5);\n"   /* across the seam */
-    "    vec3 fp = uRadius*n + east*(du*uFlatDim.x)\n"
-    "                        + north*((vc-aUV.y)*uFlatDim.y);\n"
-    "    float ang = acos(clamp(dot(p / uRadius, n), -1.0, 1.0));\n"
-    "    p = mix(p, fp, uFlat * (1.0 - smoothstep(uFlatNear, uFlatFar, ang)));\n"
+    "    float x = du * uFlatDim.x, y = (vc - aUV.y) * uFlatDim.y;\n"
+    "    vec3 c = uRadius * n;\n"
+    "    if (uFlat > 0.0) {\n"
+    "      float dw = du;\n"
+    "      if (uLonHalf > 3.1415) dw -= floor(dw + 0.5);\n" /* across the seam */
+    "      vec3 fp = c + east*(dw*uFlatDim.x) + north*y;\n"
+    "      float ang = acos(clamp(dot(p / uRadius, n), -1.0, 1.0));\n"
+    "      p = mix(p, fp, uFlat * (1.0 - smoothstep(uFlatNear, uFlatFar, ang)));\n"
+    "    }\n"
+    "    if (uPlanar > 0.0) {\n"
+    "      float k = 1.0 - uPlanar;\n"   /* curvature, the globe's = 1 */
+    "      vec3 q = c + east*x + north*y;\n"
+    "      if (k > 1e-4) {\n"
+    "        float r = uRadius / k, ps = x / r, th = y / r;\n"
+    "        float sp = sin(0.5*ps), st = sin(0.5*th);\n"
+    "        q = c + r*(cos(th)*sin(ps)*east + sin(th)*north\n"
+    "                   - 2.0*(cos(th)*sp*sp + st*st)*n);\n"  /* cos cos - 1 */
+    "      }\n"
+    "      p = mix(p, q, uPlanar);\n"
+    "    }\n"
     "  }\n"
     "  gl_Position = uMVP * vec4(p, 1.0);\n"
     "}\n";
@@ -124,6 +150,14 @@ typedef struct {
     float flat_w, flat_h;
     double last_click_t;
 
+    /* Planar view: the whole band unrolled into a flat map. planar_on is
+       where it is headed; planar_t runs linearly toward it, and planar is
+       that eased, which is what the shader sees. While it is anywhere but
+       0 the map has edges, so the view clamps to them instead of wrapping
+       around. */
+    bool planar_on;
+    float planar_t, planar;
+
     /* Snap mode: entered by fitting a photo to the window. Letting go of
        a drag far enough past its edge glides on to the neighbour that
        way; zooming in or out from the fit leaves, so a closer look pans
@@ -160,6 +194,21 @@ static float wrap_pi(float a)
     return a;
 }
 
+/* any part of the way to the flat map, or headed there */
+static bool planar_any(App *a)
+{
+    return a->planar_on || a->planar_t > 0.0f;
+}
+
+/* A globe that spans the full 360 deg wraps: turning past its seam
+   carries on round. The flat map does not; it has edges. */
+static bool wraps(App *a)
+{
+    return a->lon_half >= (float)M_PI - 1e-6f && !planar_any(a);
+}
+
+#define MORPH_DUR 1.1                   /* globe <-> map, seconds */
+
 /* ------------------------------------------------------------ web page */
 
 /* The page around the canvas shows loading progress and credits whoever
@@ -181,6 +230,16 @@ static void page_notify_status(App *a, float fps, int resident)
            fps, resident, a->vt.n_slots, a->vt.n_pending, a->vt.loads_done);
 }
 #endif
+
+/* globe or map, so the page's toggle button can follow a P key press */
+static void page_notify_planar(App *a)
+{
+#ifdef __EMSCRIPTEN__
+    EM_ASM({ if (Module.vtPlanar) Module.vtPlanar($0); }, a->planar_on);
+#else
+    (void)a;
+#endif
+}
 
 /* ------------------------------------------------------------- manifest */
 
@@ -251,8 +310,9 @@ static void compute_mvp(App *a)
                         (RADIUS + a->height) * dir[2]};
         float tgt[3] = {0, 0, 0};
         mat4_look_at(view, eye, tgt, up);
-        mat4_perspective(proj, OUT_FOV,
-                         (float)a->w.draw_w / a->w.draw_h, 0.01f, 200.0f);
+        /* the whole flat map, on a phone held upright, is a long way out */
+        mat4_perspective(proj, OUT_FOV, (float)a->w.draw_w / a->w.draw_h,
+                         0.01f, fmaxf(200.0f, a->height + 4 * RADIUS));
     }
     mat4_mul(a->mvp, proj, view);
 }
@@ -293,6 +353,20 @@ static float home_height(App *a)
     return fmaxf(12.0f, RADIUS / sinf(half) - RADIUS);
 }
 
+/* Opening height of the flat map: all of it, with a margin for the page's
+   panels. */
+static float map_height(App *a)
+{
+    static const float whole[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+    return 1.12f * fit_height(a, whole);
+}
+
+/* farthest out a zoom can go */
+static float max_height(App *a)
+{
+    return planar_any(a) ? fmaxf(60.0f, 2.0f * map_height(a)) : 60.0f;
+}
+
 /* Tangent point = where the camera looks. Continuous by construction,
    so the flattening never snaps sideways. */
 static void focus_lonlat(App *a, float *lon, float *lat)
@@ -322,6 +396,13 @@ static float diag_half_fov(App *a)
    so no limb is in view, and completes where the largest photo fills the
    window. In between, only the patch the window can see flattens, and its
    fade to the untouched sphere lies beyond the window's edge. */
+/* camera height below which the globe fills the window corner to corner */
+static float limb_height(App *a)
+{
+    float lo = fit_height(a, a->ref_rect);
+    return fmaxf(RADIUS / sinf(diag_half_fov(a)) - RADIUS, 1.25f * lo);
+}
+
 static void update_flat(App *a)
 {
     if (a->inside) {
@@ -330,8 +411,7 @@ static void update_flat(App *a)
     }
     float phi = diag_half_fov(a), d = RADIUS + a->height;
     float lo = fit_height(a, a->ref_rect);           /* fully flat by here */
-    float hi = fmaxf(RADIUS / sinf(phi) - RADIUS,    /* limb leaves view */
-                     1.25f * lo);
+    float hi = limb_height(a);                       /* limb leaves view */
     float t = clampf(logf(hi / a->height) / logf(hi / fmaxf(lo, 1e-6f)),
                      0.0f, 1.0f);
     a->flat = t * t * (3.0f - 2.0f * t);
@@ -431,6 +511,13 @@ static bool cursor_uv(App *a, float cx, float cy, float *cu, float *cv)
         d[i] /= dl;
 
     float su, sv, pu, pv;
+    if (a->planar >= 1.0f) {            /* the flat map, which has edges */
+        if (!uv_plane(a, p0, d, cu, cv))
+            return false;
+        return *cu >= 0.0f && *cu <= 1.0f && *cv >= 0.0f && *cv <= 1.0f;
+    }
+    if (a->planar > 0.0f)
+        return false;                   /* mid-morph: nothing to point at */
     bool hs = uv_sphere(a, p0, d, &su, &sv);
     if (a->flat <= 0.0f) {
         if (!hs)
@@ -444,7 +531,7 @@ static bool cursor_uv(App *a, float cx, float cy, float *cu, float *cv)
     if (!hs) { su = pu; sv = pv; }
     if (!hp) { pu = su; pv = sv; }
     float du = pu - su;
-    bool full_wrap = a->lon_half >= (float)M_PI - 1e-6f;
+    bool full_wrap = wraps(a);
     if (full_wrap)                      /* the short way across the seam */
         du -= floorf(du + 0.5f);
     *cu = su + du * a->flat;
@@ -480,7 +567,7 @@ static void glide_to(App *a, float cu, float cv, float end_zoom)
     float az1 = (cu - 0.5f) * 2 * a->lon_half;
     float el1 = (0.5f - cv) * 2 * LAT_MAX;
     a->anim.az0 = a->az;
-    a->anim.az1 = a->az + wrap_pi(az1 - a->az);
+    a->anim.az1 = wraps(a) ? a->az + wrap_pi(az1 - a->az) : az1;
     a->anim.el0 = a->el;
     a->anim.el1 = el1;
     a->anim.zoom0 = a->inside ? a->fov : a->height;
@@ -567,7 +654,7 @@ static void snap_release(App *a)
     photo_rect(a, a->snap, r);
     view_half_uv(a, &view[0], &view[1]);
     view_uv(a, &d[0], &d[1]);
-    bool full_wrap = a->lon_half >= (float)M_PI - 1e-6f;
+    bool full_wrap = wraps(a);
     float fling[2] = {a->vel_az * 0.25f / (2 * a->lon_half),
                       -a->vel_el * 0.25f / (2 * LAT_MAX)};
     float rest[2], best = 0.2f;
@@ -643,6 +730,44 @@ static void update_anim(App *a)
     }
 }
 
+/* Globe <-> flat map. From a view of the whole globe the camera glides
+   out to the whole map, centred, as it unrolls (and back again); zoomed
+   in close enough that the surface is already flattening, it stays put
+   and only what lies beyond the window changes shape. */
+static void set_planar(App *a, bool on)
+{
+    if (a->inside || on == a->planar_on)
+        return;
+    a->planar_on = on;
+    a->last_input = now_seconds();
+    a->user_moved = true;
+    a->snap = -1;
+    a->vel_az = a->vel_el = 0;
+    a->hover_pinned = a->has_hover = false;
+    if (on && a->flat <= 0.0f) {
+        glide_to(a, 0.5f, 0.5f, map_height(a));
+        a->anim.dur = MORPH_DUR;
+    } else if (!on && a->height > limb_height(a)) {
+        float cu, cv;
+        view_uv(a, &cu, &cv);
+        glide_to(a, cu, clampf(cv, 0.0f, 1.0f), home_height(a));
+        a->anim.dur = MORPH_DUR;
+    }
+    page_notify_planar(a);
+}
+
+static void update_planar(App *a, float dt)
+{
+    float step = dt / (float)MORPH_DUR;
+    a->planar_t = a->planar_on ? fminf(a->planar_t + step, 1.0f)
+                               : fmaxf(a->planar_t - step, 0.0f);
+    a->planar = smoothstep01(a->planar_t);
+    if (planar_any(a)) {                /* keep the view on the map */
+        a->az = clampf(a->az, -a->lon_half, a->lon_half);
+        a->el = clampf(a->el, -LAT_MAX, LAT_MAX);
+    }
+}
+
 static void toggle_freeze(App *a)
 {
     a->freeze ^= 1;
@@ -684,7 +809,7 @@ static void update_free_motion(App *a, float dt)
 {
     if (a->dragging || a->anim.active)
         return;
-    bool full_wrap = a->lon_half >= (float)M_PI - 1e-6f;
+    bool full_wrap = wraps(a);
     if (fabsf(a->vel_az) > 1e-3f || fabsf(a->vel_el) > 1e-3f) {
         a->az += a->vel_az * dt;
         a->el += a->vel_el * dt;
@@ -736,6 +861,7 @@ static void draw_band(void *arg)
     glUniform1f(glGetUniformLocation(c->prog, "uZSign"),
                 a->inside ? -1.0f : 1.0f);
     glUniform1f(glGetUniformLocation(c->prog, "uFlat"), a->flat);
+    glUniform1f(glGetUniformLocation(c->prog, "uPlanar"), a->planar);
     glUniform1f(glGetUniformLocation(c->prog, "uFlatNear"), a->flat_near);
     glUniform1f(glGetUniformLocation(c->prog, "uFlatFar"), a->flat_far);
     glUniform2f(glGetUniformLocation(c->prog, "uFocus"), lon_c, lat_c);
@@ -810,7 +936,7 @@ static void drag_rates(App *a, float *r_az, float *r_el)
         *r_el = px;
     } else {
         *r_el = px * a->height / RADIUS;
-        c += (1.0f - c) * a->flat;
+        c += (1.0f - c) * fmaxf(a->flat, a->planar);
     }
     *r_az = *r_el / c;
 }
@@ -832,7 +958,7 @@ static void zoom_by(App *a, float factor)
     if (a->inside)
         a->fov = clampf(a->fov * factor, 3.0f, 110.0f);
     else
-        a->height = clampf(a->height * factor, 0.02f, 60.0f);
+        a->height = clampf(a->height * factor, 0.02f, max_height(a));
 }
 
 static void handle_finger(App *a, const SDL_Event *ev)
@@ -893,15 +1019,18 @@ static void handle_events(App *a, bool *running)
                 a->hi_style = (a->hi_style + 1) % 6;
                 printf("highlight style %d\n", a->hi_style);
             }
+            else if (ev.key.keysym.sym == SDLK_p)
+                set_planar(a, !a->planar_on);
             else if (ev.key.keysym.sym == SDLK_r) {
                 a->anim.active = false;
                 a->snap = -1;
                 a->vel_az = a->vel_el = 0;
                 a->az = a->el = 0;
                 a->fov = 75.0f;
-                a->height = home_height(a);
+                a->height = a->planar_on ? map_height(a) : home_height(a);
                 a->vel_az = a->vel_el = 0;
-                a->user_moved = false;   /* back to the opening spin */
+                /* back to the opening spin, which only a globe has */
+                a->user_moved = a->planar_on;
             }
             break;
         case SDL_FINGERDOWN:
@@ -962,7 +1091,9 @@ static void handle_events(App *a, bool *running)
                 float del = (ev.motion.y - a->drag_y) * r_el;
                 a->drag_x = ev.motion.x;
                 a->drag_y = ev.motion.y;
-                a->az = wrap_pi(a->az + daz);
+                a->az = wraps(a) ? wrap_pi(a->az + daz)
+                                 : clampf(a->az + daz, -a->lon_half,
+                                          a->lon_half);
                 a->el = clampf(a->el + del,
                                -LAT_MAX - 0.25f, LAT_MAX + 0.25f);
                 float dt = a->move_t ? (float)(now - a->move_t) : 0;
@@ -992,6 +1123,17 @@ static void handle_events(App *a, bool *running)
 }
 
 /* ----------------------------------------------------------------- main */
+
+#ifdef __EMSCRIPTEN__
+static App *page_app;                   /* for the page's own buttons */
+
+/* the page's globe/map button: Module._vt_toggle_planar() */
+EMSCRIPTEN_KEEPALIVE void vt_toggle_planar(void)
+{
+    if (page_app)
+        set_planar(page_app, !page_app->planar_on);
+}
+#endif
 
 /* One iteration of the main loop: natively called from a while loop,
    on the web by the browser once per display refresh. */
@@ -1040,6 +1182,7 @@ static void frame(void *arg)
         update_free_motion(a, dt);
     }
     update_anim(a);
+    update_planar(a, dt);
     update_snap(a);
     update_flat(a);
     if (a->frames < 0)
@@ -1125,6 +1268,8 @@ int main(int argc, char **argv)
             a->manifest_path = argv[++i];
         else if (!strcmp(argv[i], "--inside"))
             a->inside = true;
+        else if (!strcmp(argv[i], "--planar"))
+            a->planar_on = true;
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
             a->frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc)
@@ -1187,6 +1332,16 @@ int main(int argc, char **argv)
     a->fov = 75.0f;
     a->height = home_height(a);
     a->last_input = now_seconds();
+    if (a->inside)
+        a->planar_on = false;           /* no map from inside the globe */
+    if (a->planar_on) {                 /* --planar: open on the flat map */
+        a->planar_t = a->planar = 1.0f;
+        a->height = map_height(a);
+        a->user_moved = true;
+    }
+#ifdef __EMSCRIPTEN__
+    page_app = a;
+#endif
 
     glEnable(GL_DEPTH_TEST);
 

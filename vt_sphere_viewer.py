@@ -22,6 +22,9 @@ it: letting go of a drag far enough past its edge glides on to the
 neighbour that way, until zooming in or out lets go. Double-clicking the
 snapped image zooms back to where you were before.
 
+P morphs between the globe and the whole mosaic unrolled into a flat
+map; on the map, panning stops at its edges instead of wrapping round.
+
 Streaming, page table, atlas, and shaders are shared with vt_viewer.py —
 virtual texturing doesn't care what geometry the UVs live on.
 
@@ -32,6 +35,7 @@ Controls: drag = orbit / look around | scroll = zoom
                          again to zoom back out
           snapped (zoomed to fill the window): drag well past the photo's
                          edge to glide on to its neighbour; zoom to leave
+          P = unroll the globe into a flat map, or roll it back up
           H = cycle highlight style
           F = freeze/unfreeze streaming (explore the frozen LOD state)
           L = LOD debug overlay | R = reset view | ESC = quit
@@ -60,11 +64,20 @@ from vt_viewer import (VERT, FRAG_MAIN, FRAG_FEEDBACK, FrustumLines,
 # radians, none beyond uFlatFar), sized to overhang the screen: blending
 # the whole band would drag the far side forward, curling it around the
 # limb into view.
+#
+# Separately, uPlanar unrolls the whole band into a flat map (P). The same
+# tangent plane is the far end, but here every vertex takes part, and the
+# path there is a sphere that grows as it flattens: tangent at the focus,
+# radius uRadius / (1 - uPlanar), laid out arc-length true, so the map
+# uncurls from the globe instead of its back half sweeping straight
+# through the front. It splits along the mosaic's own edges (u = 0 and 1),
+# which the mesh already has, never wrapping the short way: a seam there
+# would smear a row of triangles across the whole map.
 SPHERE_VERT = """#version 330 core
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec2 aUV;
 uniform mat4 uMVP;
-uniform float uRadius, uLonHalf, uLatMax, uZSign, uFlat;
+uniform float uRadius, uLonHalf, uLatMax, uZSign, uFlat, uPlanar;
 uniform float uFlatNear, uFlatFar;
 uniform vec2 uFocus;      // lon, lat of the flattening anchor
 uniform vec2 uFlatDim;    // full mosaic size once flat
@@ -76,7 +89,7 @@ void main() {
     float lon = (aUV.x - 0.5) * 2.0 * uLonHalf;
     vec3 p = uRadius * vec3(cos(lat) * sin(lon), sin(lat),
                             uZSign * cos(lat) * cos(lon));
-    if (uFlat > 0.0) {
+    if (uFlat > 0.0 || uPlanar > 0.0) {
         float lc = uFocus.x, tc = uFocus.y;
         vec3 n     = vec3(cos(tc) * sin(lc), sin(tc),
                           uZSign * cos(tc) * cos(lc));
@@ -86,13 +99,27 @@ void main() {
         float uc = 0.5 + lc / (2.0 * uLonHalf);
         float vc = 0.5 - tc / (2.0 * uLatMax);
         float du = aUV.x - uc;
-        if (uLonHalf > 3.1415) du -= floor(du + 0.5);   // across the seam
-        vec3 flat_p = uRadius * n
-                    + east  * (du * uFlatDim.x)
-                    + north * ((vc - aUV.y) * uFlatDim.y);
-        float ang = acos(clamp(dot(p / uRadius, n), -1.0, 1.0));
-        p = mix(p, flat_p,
-                uFlat * (1.0 - smoothstep(uFlatNear, uFlatFar, ang)));
+        float x = du * uFlatDim.x, y = (vc - aUV.y) * uFlatDim.y;
+        vec3 c = uRadius * n;
+        if (uFlat > 0.0) {
+            float dw = du;
+            if (uLonHalf > 3.1415) dw -= floor(dw + 0.5);  // across the seam
+            vec3 flat_p = c + east * (dw * uFlatDim.x) + north * y;
+            float ang = acos(clamp(dot(p / uRadius, n), -1.0, 1.0));
+            p = mix(p, flat_p,
+                    uFlat * (1.0 - smoothstep(uFlatNear, uFlatFar, ang)));
+        }
+        if (uPlanar > 0.0) {
+            float k = 1.0 - uPlanar;           // curvature, the globe's = 1
+            vec3 q = c + east * x + north * y;
+            if (k > 1e-4) {
+                float r = uRadius / k, ps = x / r, th = y / r;
+                float sp = sin(0.5 * ps), st = sin(0.5 * th);
+                q = c + r * (cos(th) * sin(ps) * east + sin(th) * north
+                             - 2.0 * (cos(th) * sp * sp + st * st) * n);
+            }                                  // (that last is cos cos - 1)
+            p = mix(p, q, uPlanar);
+        }
     }
     gl_Position = uMVP * vec4(p, 1.0);
 }
@@ -101,6 +128,7 @@ void main() {
 LAT_MAX = math.radians(60.0)
 RADIUS = 10.0
 OUT_FOV = 55.0            # fixed perspective FOV in outside mode
+MORPH_DUR = 1.1           # globe <-> flat map, seconds
 
 
 def band_mesh(lon_half, z_sign, n_lon=192, n_lat=64):
@@ -244,6 +272,16 @@ class SphereViewer:
         self._click = None                 # (x, y, uv, rect, snap before)
         self.flat_w = 2 * self.lon_half * RADIUS
         self.flat_h = 2 * LAT_MAX * RADIUS
+        # Planar view: the whole band unrolled into a flat map. planar_on
+        # is where it is headed; _planar_t runs linearly toward it, and
+        # planar is that eased, which is what the shader sees. While it is
+        # anywhere but 0 the map has edges, so the view clamps to them
+        # instead of wrapping around.
+        self.planar_on = args.planar and not self.inside
+        self._planar_t = self.planar = 1.0 if self.planar_on else 0.0
+        if self.planar_on:                 # --planar: open on the flat map
+            self.height = self.map_height()
+            self._user_moved = True
         glfw.set_mouse_button_callback(self.win, self.on_mouse_button)
         glfw.set_cursor_pos_callback(self.win, self.on_cursor)
         glfw.set_scroll_callback(self.win, self.on_scroll)
@@ -281,7 +319,9 @@ class SphereViewer:
         else:
             eye = (RADIUS + self.height) * self.radial()
             view = look_at(eye, np.zeros(3, np.float32), up)
-            proj = perspective(OUT_FOV, w / h, 0.01, 200.0)
+            # the whole flat map, in a tall window, is a long way out
+            proj = perspective(OUT_FOV, w / h, 0.01,
+                               max(200.0, self.height + 4 * RADIUS))
         return proj @ view
 
     def _uv_sphere(self, p0, d):
@@ -339,11 +379,18 @@ class SphereViewer:
         d = b[:3] / b[3] - p0
         d /= np.linalg.norm(d)
 
+        if self.planar >= 1.0:              # the flat map, which has edges
+            uv = self._uv_plane(p0, d)
+            if uv is None or not (0.0 <= uv[0] <= 1.0 and 0.0 <= uv[1] <= 1.0):
+                return None
+            return uv
+        if self.planar > 0.0:
+            return None                     # mid-morph: nothing to point at
         uv_s = self._uv_sphere(p0, d)
         if self.flat <= 0.0:
             return uv_s
         uv_p = self._uv_plane(p0, d)
-        full_wrap = self.lon_half >= math.pi - 1e-6
+        full_wrap = self.wraps()
         if uv_s is None or uv_p is None:
             uv = uv_p if uv_s is None else uv_s
         else:
@@ -403,7 +450,7 @@ class SphereViewer:
             r_el = px
         else:
             r_el = px * self.height / RADIUS
-            c += (1 - c) * self.flat
+            c += (1 - c) * max(self.flat, self.planar)
         return r_el / c, r_el
 
     def refresh_hover(self):
@@ -446,7 +493,8 @@ class SphereViewer:
         self._drag = (x, y)
         r_az, r_el = self.drag_rates()
         daz, del_ = -(x - px) * r_az, (y - py) * r_el
-        self.az = wrap_pi(self.az + daz)
+        self.az = (wrap_pi(self.az + daz) if self.wraps() else
+                   min(max(self.az + daz, -self.lon_half), self.lon_half))
         self.el = min(max(self.el + del_, -LAT_MAX - 0.25), LAT_MAX + 0.25)
         # velocity estimate for release momentum (smoothed, capped)
         dt = now - self._move_t if self._move_t else 0
@@ -466,7 +514,8 @@ class SphereViewer:
         if self.inside:
             self.fov = min(max(self.fov * (0.92 ** dy), 3.0), 110.0)
         else:
-            self.height = min(max(self.height * (0.92 ** dy), 0.02), 60.0)
+            self.height = min(max(self.height * (0.92 ** dy), 0.02),
+                              self.max_height())
 
     def on_key(self, win, key, sc, action, mods):
         self._last_input = time.time()
@@ -481,13 +530,17 @@ class SphereViewer:
         elif key == glfw.KEY_H:
             self.hi_style = (self.hi_style + 1) % 6
             print(f"highlight style {self.hi_style}: {HI_STYLES[self.hi_style]}")
+        elif key == glfw.KEY_P:
+            self.set_planar(not self.planar_on)
         elif key == glfw.KEY_R:
             self._anim = None
             self.snap = None
             self.az, self.el = 0.0, 0.0
-            self.fov, self.height = 75.0, 12.0
+            self.fov = 75.0
+            self.height = self.map_height() if self.planar_on else 12.0
             self._vel = [0.0, 0.0]
-            self._user_moved = False       # back to the opening attract spin
+            # back to the opening attract spin, which only a globe has
+            self._user_moved = self.planar_on
 
     def toggle_freeze(self):
         self.freeze ^= 1
@@ -510,6 +563,61 @@ class SphereViewer:
         tan_v = math.tan(math.radians(OUT_FOV) / 2)
         tan_h = tan_v * (w / max(h, 1))
         return max(ph / 2 / tan_v, pw / 2 / tan_h)
+
+    def map_height(self):
+        """Opening height of the flat map: all of it, with a margin."""
+        return 1.12 * self.fit_height((0.0, 0.0, 1.0, 1.0))
+
+    def max_height(self):
+        """Farthest out a zoom can go."""
+        return max(60.0, 2 * self.map_height()) if self.planar_any() else 60.0
+
+    def planar_any(self):
+        """Any part of the way to the flat map, or headed there."""
+        return self.planar_on or self._planar_t > 0.0
+
+    def wraps(self):
+        """A globe that spans the full 360 deg wraps: turning past its
+        seam carries on round. The flat map does not; it has edges."""
+        return self.lon_half >= math.pi - 1e-6 and not self.planar_any()
+
+    def set_planar(self, on):
+        """Globe <-> flat map. From a view of the whole globe the camera
+        glides out to the whole map, centred, as it unrolls (and back
+        again); zoomed in close enough that the surface is already
+        flattening, it stays put and only what lies beyond the window
+        changes shape."""
+        if self.inside or on == self.planar_on:
+            return
+        self.planar_on = on
+        self._last_input = time.time()
+        self._user_moved = True
+        self.snap = None
+        self._vel = [0.0, 0.0]
+        self._hover_pinned = False
+        self.hover = None
+        if on and self.flat <= 0.0:
+            self.glide_to(0.5, 0.5, self.map_height(), MORPH_DUR)
+        elif not on and self.height > self.limb_height():
+            cu, cv = self.view_uv()
+            self.glide_to(cu, min(max(cv, 0.0), 1.0), 12.0, MORPH_DUR)
+        print("flat map" if on else "globe")
+
+    def update_planar(self, dt):
+        step = dt / MORPH_DUR
+        self._planar_t = (min(self._planar_t + step, 1.0) if self.planar_on
+                          else max(self._planar_t - step, 0.0))
+        t = self._planar_t
+        self.planar = t * t * (3 - 2 * t)
+        if self.planar_any():               # keep the view on the map
+            self.az = min(max(self.az, -self.lon_half), self.lon_half)
+            self.el = min(max(self.el, -LAT_MAX), LAT_MAX)
+
+    def limb_height(self):
+        """Camera height below which the globe fills the window corner
+        to corner."""
+        lo = self.fit_height(self.ref_rect)
+        return max(RADIUS / math.sin(self.diag_half_fov()) - RADIUS, 1.25 * lo)
 
     def diag_half_fov(self):
         """Half-FOV across the window's diagonal: the farthest the view
@@ -538,7 +646,7 @@ class SphereViewer:
             return
         phi, d = self.diag_half_fov(), RADIUS + self.height
         lo = self.fit_height(self.ref_rect)                # fully flat here
-        hi = max(RADIUS / math.sin(phi) - RADIUS, 1.25 * lo)  # limb leaves
+        hi = self.limb_height()                            # limb leaves
         t = math.log(hi / self.height) / math.log(hi / max(lo, 1e-6))
         t = min(max(t, 0.0), 1.0)
         self.flat = t * t * (3 - 2 * t)
@@ -575,7 +683,8 @@ class SphereViewer:
         el1 = (0.5 - cv) * 2 * LAT_MAX
         self._anim = {
             "t": time.time(), "dur": duration,
-            "az0": self.az, "az1": self.az + wrap_pi(az1 - self.az),
+            "az0": self.az,
+            "az1": self.az + wrap_pi(az1 - self.az) if self.wraps() else az1,
             "el0": self.el, "el1": el1,
             "zoom0": self.fov if self.inside else self.height,
             "zoom1": end_zoom,
@@ -642,7 +751,7 @@ class SphereViewer:
         r = self.snap
         view = self.view_half_uv()
         d = list(self.view_uv())
-        full_wrap = self.lon_half >= math.pi - 1e-6
+        full_wrap = self.wraps()
         fling = (self._vel[0] * 0.25 / (2 * self.lon_half),
                  -self._vel[1] * 0.25 / (2 * LAT_MAX))
         c = ((r[0] + r[2]) / 2, (r[1] + r[3]) / 2)
@@ -689,7 +798,7 @@ class SphereViewer:
         """Trackball inertia after a fling, and slow idle auto-rotate."""
         if self._drag or self._anim is not None:
             return
-        full_wrap = self.lon_half >= math.pi - 1e-6
+        full_wrap = self.wraps()
         vaz, vel_ = self._vel
         if abs(vaz) > 1e-3 or abs(vel_) > 1e-3:
             self.az += vaz * dt
@@ -743,6 +852,7 @@ class SphereViewer:
         glUniform1f(glGetUniformLocation(prog, "uZSign"),
                     -1.0 if self.inside else 1.0)
         glUniform1f(glGetUniformLocation(prog, "uFlat"), self.flat)
+        glUniform1f(glGetUniformLocation(prog, "uPlanar"), self.planar)
         glUniform1f(glGetUniformLocation(prog, "uFlatNear"), self.flat_near)
         glUniform1f(glGetUniformLocation(prog, "uFlatFar"), self.flat_far)
         glUniform2f(glGetUniformLocation(prog, "uFocus"), lon_c, lat_c)
@@ -810,6 +920,7 @@ class SphereViewer:
                     if settled or extra > 600:
                         break
             self.update_anim()
+            self.update_planar(dt)
             self.update_snap()
             self.update_flat()
             if self.args.frames is None:
@@ -867,6 +978,8 @@ def main():
     ap.add_argument("--pyramid", default="pics/test_image_16k_pyramid")
     ap.add_argument("--inside", action="store_true",
                     help="view from the sphere's center (panorama mode)")
+    ap.add_argument("--planar", action="store_true",
+                    help="open on the flat map (P toggles; not with --inside)")
     ap.add_argument("--manifest", default=None,
                     help="layout.json for click-to-center "
                          "(default: derived from the pyramid name)")
