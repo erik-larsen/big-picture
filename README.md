@@ -176,6 +176,7 @@ cd ../big-picture-tiles && git checkout --orphan new && git add -A \
 | click | centre the view on that image, eased |
 | double click | zoom until that image fills the window, or back out again (sphere viewer) |
 | **P**, map/globe button | unroll the globe into a flat map, or roll it back up (sphere viewer) |
+| arrow keys | outline the next photo that way and centre it, at the same zoom; snapped, fit it instead (sphere viewer) |
 | **H** | cycle hover-highlight style |
 | **F** | freeze / unfreeze streaming |
 | **L** | LOD debug overlay |
@@ -195,6 +196,13 @@ turn; anything less springs back. Clicking a neighbour snaps to it too, and
 double clicking the snapped photo returns to the zoom you double clicked
 from. Zoom in or out and the snap lets go: out, the globe is free again;
 in, you can pan around the photo without being pulled to its neighbours.
+Zoomed to a photo's extents — fitted to the window — or closer, the photo
+stands alone: its outline goes, and everything around it fades to black.
+Moving on to a neighbour (arrow keys, a click, or a drag past the edge)
+lights both photos until the glide arrives, then lets the old one go dark.
+Zoom out past the fit and the outline comes back and the rest fades back
+in. It depends only on the zoom, so a double click fades in as it arrives,
+and scrolling in or out does the same.
 
 **P** (the map/globe button in the browser) morphs the whole globe into a
 flat map of the mosaic and back. Unlike the zoom de-warp, every vertex takes
@@ -205,6 +213,14 @@ mosaic's own left and right edges, so on the map panning stops at those edges
 instead of wrapping round. From a view of the whole globe the camera glides
 out to the whole map as it unrolls (and back); zoomed in close, it stays put
 and only what lies beyond the window changes shape. `--planar` opens on the map.
+
+The **arrow keys** step from the outlined photo to its neighbour that way —
+the nearest row above or below, picking the photo most nearly in line, or
+the next one along the row — outline it, and glide to centre it without
+changing the zoom. With nothing outlined, the first press picks the photo at
+the centre of the view. Left and right carry on round the globe's seam; on
+the flat map they stop at its edges. Snapped to a photo, they snap to the
+neighbour instead, fitting it to the window so it stays in the spotlight.
 
 The sphere viewer opens in an attract spin — a slow auto-rotate that stops
 for good the moment you touch the view, and comes back on **R**

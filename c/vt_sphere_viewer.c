@@ -11,8 +11,10 @@
     it again zooms back out. A photo zoomed to fill the window is snapped:
     dragging far enough toward a neighbour glides on to that one, until
     zooming in or out lets go. Trackball fling inertia and slow idle auto-rotate
-    included. P (or the page's button) morphs between the globe and the
-    whole mosaic unrolled into a flat map.
+    included. Zoomed to a photo's extents or closer, it stands alone: no
+    outline, and the rest fades to black. P (or the page's button) morphs between the globe and the
+    whole mosaic unrolled into a flat map. The arrow keys step the outline
+    to the next photo that way and centre it, at the same zoom.
 
     Usage: vt_sphere_viewer [--pyramid DIR] [--inside] [--planar] [--manifest F]
                             [--idle-delay S] [--idle-speed DEG/S]
@@ -157,6 +159,14 @@ typedef struct {
        around. */
     bool planar_on;
     float planar_t, planar;
+
+    /* Spotlight: zoomed to a photo's extents or closer, the rest fades to
+       black and the outline goes (spot_t linear, spot eased). Moving on to
+       another photo, the one being left stays lit too (spot_prev, by
+       spot_prev_amt) until the glide arrives, then fades out. */
+    float spot_t, spot, spot_rect[4], spot_prev[4], spot_prev_amt;
+    int spot_photo;             /* photo lit, -1 = none yet */
+    int spot_next;              /* photo a glide is headed to, or -1 */
 
     /* Snap mode: entered by fitting a photo to the window. Letting go of
        a drag far enough past its edge glides on to the neighbour that
@@ -576,6 +586,7 @@ static void glide_to(App *a, float cu, float cv, float end_zoom)
     a->anim.dur = 0.5;
     a->anim.active = true;
     a->vel_az = a->vel_el = 0;
+    a->spot_next = -1;          /* callers headed for a photo set it after */
 }
 
 /* centre photo i and zoom until it fills the window: snap mode */
@@ -642,6 +653,7 @@ static void click_center_zoom(App *a, float cx, float cy, bool dbl)
     float r[4];
     photo_rect(a, hit, r);                /* center the image, not the point */
     glide_to(a, (r[0] + r[2]) * 0.5f, (r[1] + r[3]) * 0.5f, zoom);
+    a->spot_next = hit;
 }
 
 /* Snap mode, letting go of a drag: past the snapped photo's edge by a
@@ -697,6 +709,87 @@ static void snap_release(App *a)
         glide_to(a, c[0] + rest[0], c[1] + rest[1], a->height);
 }
 
+/* The photo next to `cur` in direction (dx, dy), or -1. Of the photos
+   that lie that way and overlap it across that axis, the nearest row (or
+   column) wins, then within it the one most nearly in line. Left and right
+   carry on round a globe's seam; the flat map stops at its edges. */
+static int neighbour(App *a, int cur, int dx, int dy)
+{
+    const VtRect *c = &a->manifest.rects[cur];
+    bool wrap = dx != 0 && wraps(a);
+    float best_along = 1e30f, best_cross = 1e30f;
+    int best = -1;
+    for (int pass = 0; pass < 2; pass++)
+        for (int i = 0; i < a->manifest.n; i++) {
+            const VtRect *r = &a->manifest.rects[i];
+            if (i == cur)
+                continue;
+            float along, overlap, cross;
+            if (dx) {
+                along = dx < 0 ? c->x - (r->x + r->w) : r->x - (c->x + c->w);
+                if (wrap && along < -2)
+                    along += a->vt.virt_w;
+                overlap = fminf(c->y + c->h, r->y + r->h) - fmaxf(c->y, r->y);
+                cross = fabsf(r->y + 0.5f * r->h - (c->y + 0.5f * c->h));
+            } else {
+                along = dy < 0 ? c->y - (r->y + r->h) : r->y - (c->y + c->h);
+                overlap = fminf(c->x + c->w, r->x + r->w) - fmaxf(c->x, r->x);
+                cross = fabsf(r->x + 0.5f * r->w - (c->x + 0.5f * c->w));
+            }
+            if (along < -2 || overlap <= 0)
+                continue;                 /* not that way, or not in line */
+            if (pass == 0)
+                best_along = fminf(best_along, along);
+            else if (along <= best_along + 2 && cross < best_cross) {
+                best_cross = cross;
+                best = i;
+            }
+        }
+    return best;
+}
+
+/* Arrow keys: from the highlighted photo -- or, with none, the one at the
+   view centre -- to its neighbour that way, which is outlined and centred
+   at the same zoom. Snapped, the neighbour is snapped to instead: fitted
+   to the window, so it stays in the spotlight. */
+static void step_photo(App *a, int dx, int dy)
+{
+    if (!a->manifest.rects)
+        return;
+    float r[4];
+    int n = -1;
+    if (a->has_hover) {
+        int cur = vt_manifest_rect_at(&a->manifest,
+                                      0.5f * (a->hover_uv[0] + a->hover_uv[2]),
+                                      0.5f * (a->hover_uv[1] + a->hover_uv[3]),
+                                      a->vt.virt_w, a->vt.virt_h, r);
+        if (cur >= 0)
+            n = neighbour(a, cur, dx, dy);
+    } else {
+        float cu, cv;
+        view_uv(a, &cu, &cv);
+        if (wraps(a))
+            cu -= floorf(cu);
+        n = vt_manifest_rect_at(&a->manifest, cu, cv, a->vt.virt_w,
+                                a->vt.virt_h, r);
+    }
+    if (n < 0)
+        return;
+    a->last_input = now_seconds();
+    a->user_moved = true;
+    if (a->snap >= 0) {
+        snap_to(a, n);
+        return;
+    }
+    snprintf(a->last_click, sizeof a->last_click, "%s",
+             a->manifest.rects[n].name);
+    pin_hover(a, n);
+    photo_rect(a, n, r);
+    glide_to(a, 0.5f * (r[0] + r[2]), 0.5f * (r[1] + r[3]),
+             a->inside ? a->fov : a->height);
+    a->spot_next = n;
+}
+
 /* zooming in or out from the fit leaves snap mode: out, the photo no
    longer fills the window; in, panning around it should not snap (glides
    excepted: they pass through on the way to a fit) */
@@ -743,7 +836,9 @@ static void set_planar(App *a, bool on)
     a->user_moved = true;
     a->snap = -1;
     a->vel_az = a->vel_el = 0;
-    a->hover_pinned = a->has_hover = false;
+    if (!a->hover_pinned)       /* the pointer's photo is moving under it;
+                                   a chosen one stays outlined */
+        a->has_hover = false;
     if (on && a->flat <= 0.0f) {
         glide_to(a, 0.5f, 0.5f, map_height(a));
         a->anim.dur = MORPH_DUR;
@@ -754,6 +849,58 @@ static void set_planar(App *a, bool on)
         a->anim.dur = MORPH_DUR;
     }
     page_notify_planar(a);
+}
+
+#define SPOT_DUR 0.45                   /* fade to black, seconds */
+
+/* The photo the spotlight is on: the snapped one, else the one a glide is
+   headed to, else whichever sits at the view centre -- or the last one,
+   while the centre crosses a gap. */
+static int spot_subject(App *a)
+{
+    if (a->snap >= 0)
+        return a->snap;
+    if (a->anim.active && a->spot_next >= 0)
+        return a->spot_next;
+    float cu, cv, r[4];
+    view_uv(a, &cu, &cv);
+    if (wraps(a))
+        cu -= floorf(cu);
+    int i = vt_manifest_rect_at(&a->manifest, cu, cv, a->vt.virt_w,
+                                a->vt.virt_h, r);
+    return i >= 0 ? i : a->spot_photo;
+}
+
+/* On at zoomed-to-extents -- the subject fitted to the window -- or any
+   closer, off further out, fading between the two. Keyed to the zoom, not
+   to how it got there: a double click's glide fades in as it arrives, and
+   a scroll in or out turns it on or off just the same. A glide from one
+   lit photo to another that ends at extents keeps it on throughout, though
+   the zoom passes through other values on the way. */
+static void update_spot(App *a, float dt)
+{
+    float goal = 0.0f;
+    int s = a->inside || !a->manifest.rects ? -1 : spot_subject(a);
+    if (s >= 0) {
+        if (s != a->spot_photo) {
+            if (a->spot_photo >= 0 && a->spot_t > 0.0f) {
+                photo_rect(a, a->spot_photo, a->spot_prev);  /* leaving it */
+                a->spot_prev_amt = 1.0f;
+            }
+            a->spot_photo = s;
+        }
+        photo_rect(a, s, a->spot_rect);
+        float fit = 1.02f * fit_height(a, a->spot_rect);
+        bool arriving = a->anim.active && a->spot_t > 0.0f
+                        && a->anim.zoom1 <= fit;
+        goal = a->height <= fit || arriving ? 1.0f : 0.0f;
+    }
+    if (!a->anim.active)        /* arrived: let go of the photo left behind */
+        a->spot_prev_amt = fmaxf(a->spot_prev_amt - dt / 0.25f, 0.0f);
+    float step = dt / (float)SPOT_DUR;
+    a->spot_t = a->spot_t < goal ? fminf(a->spot_t + step, goal)
+                                 : fmaxf(a->spot_t - step, goal);
+    a->spot = smoothstep01(a->spot_t);
 }
 
 static void update_planar(App *a, float dt)
@@ -1021,6 +1168,14 @@ static void handle_events(App *a, bool *running)
             }
             else if (ev.key.keysym.sym == SDLK_p)
                 set_planar(a, !a->planar_on);
+            else if (ev.key.keysym.sym == SDLK_LEFT)
+                step_photo(a, -1, 0);
+            else if (ev.key.keysym.sym == SDLK_RIGHT)
+                step_photo(a, 1, 0);
+            else if (ev.key.keysym.sym == SDLK_UP)
+                step_photo(a, 0, -1);
+            else if (ev.key.keysym.sym == SDLK_DOWN)
+                step_photo(a, 0, 1);
             else if (ev.key.keysym.sym == SDLK_r) {
                 a->anim.active = false;
                 a->snap = -1;
@@ -1184,6 +1339,7 @@ static void frame(void *arg)
     update_anim(a);
     update_planar(a, dt);
     update_snap(a);
+    update_spot(a, dt);
     update_flat(a);
     if (a->frames < 0)
         refresh_hover(a);
@@ -1203,14 +1359,24 @@ static void frame(void *arg)
     }
 
     glViewport(0, 0, a->w.draw_w, a->w.draw_h);
-    glClearColor(0.05f, 0.06f, 0.08f, 1);
+    float bg = 1.0f - a->spot;          /* the backdrop fades out too */
+    glClearColor(0.05f * bg, 0.06f * bg, 0.08f * bg, 1);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     DrawCtx main_ctx = {a, a->vt.prog_main};
     vt_bind(&a->vt, a->vt.prog_main);
     glUniform1i(glGetUniformLocation(a->vt.prog_main, "uDebug"), a->debug);
-    vt_highlight_uniforms(a->vt.prog_main, a->has_hover ? a->hover_uv : NULL,
+    /* in the spotlight the photo needs no outline on top */
+    vt_highlight_uniforms(a->vt.prog_main,
+                          a->has_hover && a->spot <= 0.0f ? a->hover_uv : NULL,
                           a->hi_style, (float)(now_seconds() - a->t0),
                           a->w.dpi_scale);
+    glUniform4fv(glGetUniformLocation(a->vt.prog_main, "uSpotRect"), 1,
+                 a->spot_rect);
+    glUniform1f(glGetUniformLocation(a->vt.prog_main, "uSpot"), a->spot);
+    glUniform4fv(glGetUniformLocation(a->vt.prog_main, "uSpotPrev"), 1,
+                 a->spot_prev);
+    glUniform1f(glGetUniformLocation(a->vt.prog_main, "uSpotPrevAmt"),
+                a->spot_prev_amt);
     draw_band(&main_ctx);
     if (a->freeze)
         vt_lines_draw(&a->lines, a->mvp);
@@ -1260,7 +1426,8 @@ int main(int argc, char **argv)
     a->idle_speed = 3.0f;
     a->idle_dir = 1.0f;
     a->hi_style = 2;
-    a->snap = a->click_snap = a->click_hit = -1;
+    a->snap = a->click_snap = a->click_hit = a->spot_photo = -1;
+    a->spot_next = -1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--pyramid") && i + 1 < argc)
             a->pyramid = argv[++i];

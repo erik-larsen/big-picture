@@ -119,7 +119,29 @@ static const char *VS_SRC =
     "  return mix(col, hi, core);\n" \
     "}\n"
 
-static const char *FS_MAIN_SRC = VT_GLSL_COMMON VT_GLSL_HIGHLIGHT
+/* Spotlight: everything outside uSpotRect fades toward black by uSpot
+   (0 = off, the default for a viewer that never sets it). uSpotPrev is a
+   second rect lit by uSpotPrevAmt: the photo being left, which stays lit
+   until the move to the next one arrives. Edges are antialiased to a pixel
+   the same way as the outline. */
+#define VT_GLSL_SPOT \
+    "uniform vec4 uSpotRect, uSpotPrev;\n" \
+    "uniform float uSpot, uSpotPrevAmt;\n" \
+    "float vtInside(vec4 r, vec2 uv) {\n" \
+    "  vec2 d = abs(uv - (r.xy + r.zw) * 0.5) - (r.zw - r.xy) * 0.5;\n" \
+    "  float sd = max(d.x, d.y);\n" \
+    "  float spx = length(vec2(dFdx(sd), dFdy(sd)));\n" \
+    "  return 1.0 - (spx > 0.0 ? smoothstep(-0.5, 0.5, sd / spx)\n" \
+    "                          : step(0.0, sd));\n" \
+    "}\n" \
+    "vec3 vtSpot(vec3 col, vec2 uv) {\n" \
+    "  if (uSpot <= 0.0) return col;\n" \
+    "  float lit = max(vtInside(uSpotRect, uv),\n" \
+    "                  uSpotPrevAmt * vtInside(uSpotPrev, uv));\n" \
+    "  return col * (1.0 - uSpot * (1.0 - lit));\n" \
+    "}\n"
+
+static const char *FS_MAIN_SRC = VT_GLSL_COMMON VT_GLSL_HIGHLIGHT VT_GLSL_SPOT
     "uniform int uDebug;\n"
     "void main(){\n"
     "  vec2 uv = clamp(vUV, 0.0, 0.9999999);\n"
@@ -131,7 +153,7 @@ static const char *FS_MAIN_SRC = VT_GLSL_COMMON VT_GLSL_HIGHLIGHT
     "    vec3 lc = 0.5+0.5*cos(6.2832*(lod/7.0+vec3(0.0,0.33,0.67)));\n"
     "    c.rgb = mix(c.rgb, lc, 0.45);\n"
     "  }\n"
-    "  gl_FragColor = vec4(vtHighlight(c.rgb, uv), 1.0);\n"
+    "  gl_FragColor = vec4(vtHighlight(vtSpot(c.rgb, uv), uv), 1.0);\n"
     "}\n";
 
 /* feedback: pack (pageX:12, pageY:12, level:4) with float arithmetic;

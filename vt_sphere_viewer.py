@@ -20,10 +20,15 @@ clicked file's name is shown in the window title.
 Double-clicking zooms until the image fills the window, which snaps to
 it: letting go of a drag far enough past its edge glides on to the
 neighbour that way, until zooming in or out lets go. Double-clicking the
-snapped image zooms back to where you were before.
+snapped image zooms back to where you were before. Zoomed to an image's
+extents or closer it stands alone: no outline, and everything else fades
+to black.
 
 P morphs between the globe and the whole mosaic unrolled into a flat
 map; on the map, panning stops at its edges instead of wrapping round.
+
+The arrow keys step from the outlined image to its neighbour that way,
+outline that one, and centre it at the same zoom.
 
 Streaming, page table, atlas, and shaders are shared with vt_viewer.py —
 virtual texturing doesn't care what geometry the UVs live on.
@@ -36,6 +41,7 @@ Controls: drag = orbit / look around | scroll = zoom
           snapped (zoomed to fill the window): drag well past the photo's
                          edge to glide on to its neighbour; zoom to leave
           P = unroll the globe into a flat map, or roll it back up
+          arrows = step the outline to the next photo that way, centred
           H = cycle highlight style
           F = freeze/unfreeze streaming (explore the frozen LOD state)
           L = LOD debug overlay | R = reset view | ESC = quit
@@ -129,6 +135,7 @@ LAT_MAX = math.radians(60.0)
 RADIUS = 10.0
 OUT_FOV = 55.0            # fixed perspective FOV in outside mode
 MORPH_DUR = 1.1           # globe <-> flat map, seconds
+SPOT_DUR = 0.45           # snapped: the rest fades to black, seconds
 
 
 def band_mesh(lon_half, z_sign, n_lon=192, n_lat=64):
@@ -279,6 +286,17 @@ class SphereViewer:
         # instead of wrapping around.
         self.planar_on = args.planar and not self.inside
         self._planar_t = self.planar = 1.0 if self.planar_on else 0.0
+        # Spotlight: zoomed to a photo's extents or closer, the rest fades
+        # to black and the outline goes (_spot_t linear, spot eased).
+        # Moving on to another photo, the one being left stays lit too
+        # (spot_prev, by spot_prev_amt) until the glide arrives, then
+        # fades out.
+        self._spot_t = self.spot = 0.0
+        self._spot_photo = None            # photo lit
+        self._spot_next = None             # photo a glide is headed to
+        self.spot_rect = [0.0, 0.0, 0.0, 0.0]
+        self.spot_prev = [0.0, 0.0, 0.0, 0.0]
+        self.spot_prev_amt = 0.0
         if self.planar_on:                 # --planar: open on the flat map
             self.height = self.map_height()
             self._user_moved = True
@@ -469,7 +487,7 @@ class SphereViewer:
                       if uv else None)
 
     def upload_highlight(self, prog):
-        r = self.hover
+        r = None if self.spot > 0 else self.hover  # spotlit: no line
         glUniform4f(glGetUniformLocation(prog, "uHoverRect"),
                     *(r[:4] if r else (0.0, 0.0, -1.0, -1.0)))
         glUniform1i(glGetUniformLocation(prog, "uHiStyle"), self.hi_style)
@@ -479,6 +497,11 @@ class SphereViewer:
         ww, _ = glfw.get_window_size(self.win)
         glUniform1f(glGetUniformLocation(prog, "uHiScale"),
                     fw / ww if ww else 1.0)
+        glUniform4f(glGetUniformLocation(prog, "uSpotRect"), *self.spot_rect)
+        glUniform1f(glGetUniformLocation(prog, "uSpot"), self.spot)
+        glUniform4f(glGetUniformLocation(prog, "uSpotPrev"), *self.spot_prev)
+        glUniform1f(glGetUniformLocation(prog, "uSpotPrevAmt"),
+                    self.spot_prev_amt)
 
     def on_cursor(self, win, x, y):
         if not (self.snap and self._drag):  # a snapped drag keeps the
@@ -519,6 +542,11 @@ class SphereViewer:
 
     def on_key(self, win, key, sc, action, mods):
         self._last_input = time.time()
+        arrows = {glfw.KEY_LEFT: (-1, 0), glfw.KEY_RIGHT: (1, 0),
+                  glfw.KEY_UP: (0, -1), glfw.KEY_DOWN: (0, 1)}
+        if key in arrows and action in (glfw.PRESS, glfw.REPEAT):
+            self.step_photo(*arrows[key])
+            return
         if action != glfw.PRESS:
             return
         if key == glfw.KEY_ESCAPE:
@@ -594,14 +622,57 @@ class SphereViewer:
         self._user_moved = True
         self.snap = None
         self._vel = [0.0, 0.0]
-        self._hover_pinned = False
-        self.hover = None
+        if not self._hover_pinned:   # the pointer's photo is moving under
+            self.hover = None        # it; a chosen one stays outlined
         if on and self.flat <= 0.0:
             self.glide_to(0.5, 0.5, self.map_height(), MORPH_DUR)
         elif not on and self.height > self.limb_height():
             cu, cv = self.view_uv()
             self.glide_to(cu, min(max(cv, 0.0), 1.0), 12.0, MORPH_DUR)
         print("flat map" if on else "globe")
+
+    def spot_subject(self):
+        """The photo the spotlight is on: the snapped one, else the one a
+        glide is headed to, else whichever sits at the view centre -- or
+        the last one, while the centre crosses a gap."""
+        if self.snap:
+            return self.snap
+        if self._anim is not None and self._spot_next:
+            return self._spot_next
+        cu, cv = self.view_uv()
+        if self.wraps():
+            cu -= math.floor(cu)
+        r = rect_at_uv(self.manifest, cu, cv, self.vt.virt_w, self.vt.virt_h)
+        return r or self._spot_photo
+
+    def update_spot(self, dt):
+        """On at zoomed-to-extents -- the subject fitted to the window --
+        or any closer, off further out, fading between the two. Keyed to
+        the zoom, not to how it got there: a double click's glide fades in
+        as it arrives, and a scroll in or out turns it on or off just the
+        same. A glide from one lit photo to another that ends at extents
+        keeps it on throughout, though the zoom passes through other
+        values on the way."""
+        goal = 0.0
+        s = None if self.inside or not self.manifest else self.spot_subject()
+        if s:
+            if s != self._spot_photo:
+                if self._spot_photo and self._spot_t > 0.0:   # leaving it
+                    self.spot_prev = list(self._spot_photo[:4])
+                    self.spot_prev_amt = 1.0
+                self._spot_photo = s
+            self.spot_rect = list(s[:4])
+            fit = 1.02 * self.fit_height(s)
+            arriving = (self._anim is not None and self._spot_t > 0.0
+                        and self._anim["zoom1"] <= fit)
+            goal = 1.0 if self.height <= fit or arriving else 0.0
+        if self._anim is None:     # arrived: let go of the photo left behind
+            self.spot_prev_amt = max(self.spot_prev_amt - dt / 0.25, 0.0)
+        step = dt / SPOT_DUR
+        self._spot_t = (min(self._spot_t + step, goal) if self._spot_t < goal
+                        else max(self._spot_t - step, goal))
+        t = self._spot_t
+        self.spot = t * t * (3 - 2 * t)
 
     def update_planar(self, dt):
         step = dt / MORPH_DUR
@@ -690,6 +761,7 @@ class SphereViewer:
             "zoom1": end_zoom,
         }
         self._vel = [0.0, 0.0]
+        self._spot_next = None     # callers headed for a photo set it after
 
     def pin_hover(self, rect):
         self.hover = rect
@@ -741,6 +813,7 @@ class SphereViewer:
                 return
         self.pin_hover(rect)
         self.glide_to(*centre, zoom)           # single click: centre only
+        self._spot_next = rect
 
     def snap_release(self):
         """Snap mode, letting go of a drag: past the snapped photo's edge
@@ -784,6 +857,82 @@ class SphereViewer:
         self._vel = [0.0, 0.0]                 # no fling while snapped
         if abs(rest[0] - d[0]) > 1e-6 or abs(rest[1] - d[1]) > 1e-6:
             self.glide_to(c[0] + rest[0], c[1] + rest[1], self.height)
+
+    def _rect_uv(self, r):
+        """A manifest entry as (u0, v0, u1, v1, name), as rect_at_uv gives."""
+        w, h = self.vt.virt_w, self.vt.virt_h
+        return (r["x"] / w, r["y"] / h, (r["x"] + r["w"]) / w,
+                (r["y"] + r["h"]) / h, Path(r["path"]).name)
+
+    def neighbour(self, cur, dx, dy):
+        """The manifest entry next to `cur` in direction (dx, dy), or
+        None. Of the photos that lie that way and overlap it across that
+        axis, the nearest row (or column) wins, then within it the one
+        most nearly in line. Left and right carry on round a globe's seam;
+        the flat map stops at its edges."""
+        wrap = dx != 0 and self.wraps()
+        cands = []
+        for r in self.manifest:
+            if r is cur:
+                continue
+            if dx:
+                along = (cur["x"] - (r["x"] + r["w"]) if dx < 0
+                         else r["x"] - (cur["x"] + cur["w"]))
+                if wrap and along < -2:
+                    along += self.vt.virt_w
+                overlap = (min(cur["y"] + cur["h"], r["y"] + r["h"])
+                           - max(cur["y"], r["y"]))
+                cross = abs(r["y"] + r["h"] / 2 - cur["y"] - cur["h"] / 2)
+            else:
+                along = (cur["y"] - (r["y"] + r["h"]) if dy < 0
+                         else r["y"] - (cur["y"] + cur["h"]))
+                overlap = (min(cur["x"] + cur["w"], r["x"] + r["w"])
+                           - max(cur["x"], r["x"]))
+                cross = abs(r["x"] + r["w"] / 2 - cur["x"] - cur["w"] / 2)
+            if along >= -2 and overlap > 0:   # that way, and in line
+                cands.append((along, cross, r))
+        if not cands:
+            return None
+        nearest = min(c[0] for c in cands)
+        return min((c for c in cands if c[0] <= nearest + 2),
+                   key=lambda c: c[1])[2]
+
+    def step_photo(self, dx, dy):
+        """Arrow keys: from the highlighted photo -- or, with none, the
+        one at the view centre -- to its neighbour that way, which is
+        outlined and centred at the same zoom. Snapped, the neighbour is
+        snapped to instead: fitted to the window, so it stays in the
+        spotlight."""
+        if not self.manifest:
+            return
+        w, h = self.vt.virt_w, self.vt.virt_h
+        def entry_at(u, v):
+            px, py = u * w, v * h
+            for r in self.manifest:
+                if (r["x"] <= px < r["x"] + r["w"]
+                        and r["y"] <= py < r["y"] + r["h"]):
+                    return r
+            return None
+        if self.hover:
+            cur = entry_at((self.hover[0] + self.hover[2]) / 2,
+                           (self.hover[1] + self.hover[3]) / 2)
+            n = self.neighbour(cur, dx, dy) if cur else None
+        else:
+            cu, cv = self.view_uv()
+            if self.wraps():
+                cu -= math.floor(cu)
+            n = entry_at(cu, cv)
+        if n is None:
+            return
+        self._user_moved = True
+        rect = self._rect_uv(n)
+        if self.snap:                  # snapped: fit it, stay in the spot
+            self.snap_to(rect)
+            return
+        self.pin_hover(rect)
+        self.glide_to((rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2,
+                      self.fov if self.inside else self.height)
+        self._spot_next = rect
 
     def update_snap(self):
         """Zooming in or out from the fit leaves snap mode: out, the photo
@@ -922,6 +1071,7 @@ class SphereViewer:
             self.update_anim()
             self.update_planar(dt)
             self.update_snap()
+            self.update_spot(dt)
             self.update_flat()
             if self.args.frames is None:
                 self.refresh_hover()
@@ -933,7 +1083,8 @@ class SphereViewer:
                 self.vt.pump_uploads()
 
             glViewport(0, 0, w, h)
-            glClearColor(0.05, 0.06, 0.08, 1)
+            bg = 1.0 - self.spot              # the backdrop fades out too
+            glClearColor(0.05 * bg, 0.06 * bg, 0.08 * bg, 1)
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
             glUseProgram(self.prog_main)
             glUniform1i(glGetUniformLocation(self.prog_main, "uDebug"),

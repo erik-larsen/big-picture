@@ -129,6 +129,26 @@ vec3 vtHighlight(vec3 col, vec2 uv) {
     return mix(col, hi, core);
 }
 
+// Spotlight: everything outside uSpotRect fades toward black by uSpot
+// (0 = off, the default for a viewer that never sets it). uSpotPrev is a
+// second rect lit by uSpotPrevAmt: the photo being left, which stays lit
+// until the move to the next one arrives. Edges are antialiased to a pixel
+// the same way as the outline.
+uniform vec4 uSpotRect, uSpotPrev;
+uniform float uSpot, uSpotPrevAmt;
+float vtInside(vec4 r, vec2 uv) {
+    vec2 d = abs(uv - (r.xy + r.zw) * 0.5) - (r.zw - r.xy) * 0.5;
+    float sd = max(d.x, d.y);
+    float spx = length(vec2(dFdx(sd), dFdy(sd)));
+    return 1.0 - (spx > 0.0 ? smoothstep(-0.5, 0.5, sd / spx) : step(0.0, sd));
+}
+vec3 vtSpot(vec3 col, vec2 uv) {
+    if (uSpot <= 0.0) return col;
+    float lit = max(vtInside(uSpotRect, uv),
+                    uSpotPrevAmt * vtInside(uSpotPrev, uv));
+    return col * (1.0 - uSpot * (1.0 - lit));
+}
+
 uniform int uDebug;
 void main() {
     vec2 uv = clamp(vUV, 0.0, 0.9999999);
@@ -140,7 +160,7 @@ void main() {
         vec3 lc = 0.5 + 0.5 * cos(6.2832 * (lod / 7.0 + vec3(0.0, 0.33, 0.67)));
         c.rgb = mix(c.rgb, lc, 0.45);
     }
-    frag = vec4(vtHighlight(c.rgb, uv), 1.0);
+    frag = vec4(vtHighlight(vtSpot(c.rgb, uv), uv), 1.0);
 }
 """
 
